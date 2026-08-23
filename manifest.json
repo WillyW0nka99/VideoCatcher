@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Video Catcher",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "מזהה זרמי וידאו בדפים נתמכים ומאפשר לשמור וידאו וכתוביות למחשב מתוך הדפדפן.",
   "minimum_chrome_version": "116",
   "permissions": [
