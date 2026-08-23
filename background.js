@@ -192,7 +192,6 @@ function scanFrame() {
       if (url) push({ type: 'dash', url, label: 'זרם DASH', rank: 70, title, duration, thumbnail, source: 'playerConfig' });
     });
 
-
     const textTracks = request.text_tracks || request.textTracks || cfg.text_tracks || cfg.textTracks || video.text_tracks || video.textTracks || [];
     if (Array.isArray(textTracks)) textTracks.forEach(t => {
       const url = clean(t?.url || t?.src || t?.file || '');
@@ -234,7 +233,6 @@ function scanFrame() {
     });
   } catch (_) {}
 
-  // Last resort: look for embedded playerConfig JSON in inline scripts.
   try {
     for (const s of document.scripts) {
       const text = s.textContent || '';
@@ -305,7 +303,9 @@ async function startHlsDownload(payload) {
     variantUrl: payload.variantUrl || '',
     audioUrl: payload.audioUrl || '',
     title: payload.title || 'וידאו',
-    quality: payload.quality || ''
+    quality: payload.quality || '',
+    split: !!payload.split,
+    maxPartBytes: Math.max(0, Number(payload.maxPartBytes || 0))
   };
   await debugLog('info', 'hls.download.request', job);
   await ensureOffscreen();
@@ -316,10 +316,12 @@ async function startHlsDownload(payload) {
     progress: 0,
     title: job.title,
     quality: job.quality,
+    split: job.split,
+    maxPartBytes: job.maxPartBytes,
+    downloadIds: [],
     startedAt: now()
   });
 
-  // Keep routing fields last so a UI payload can never overwrite them.
   let ack;
   try {
     ack = await Promise.race([
@@ -344,12 +346,11 @@ async function startHlsDownload(payload) {
   return { ok: true, taskId };
 }
 
-
 async function cancelTask(taskId) {
   const tasks = await getTasks();
   const task = tasks[taskId];
   if (!task) return { ok: false, error: 'Download task not found.' };
-  await debugLog('info', 'task.cancel.request', { taskId, status: task.status, downloadId: task.downloadId || null });
+  await debugLog('info', 'task.cancel.request', { taskId, status: task.status, downloadId: task.downloadId || null, downloadIds: task.downloadIds || [] });
   await setTask(taskId, { status: 'cancelling', detail: 'מבטל הורדה…', cancelRequested: true });
 
   try {
@@ -360,10 +361,11 @@ async function cancelTask(taskId) {
     ]);
   } catch (_) {}
 
-  if (Number.isInteger(task.downloadId)) {
-    try { await chrome.downloads.cancel(task.downloadId); } catch (_) {}
-    try { await chrome.downloads.removeFile(task.downloadId); } catch (_) {}
-    try { await chrome.downloads.erase({ id: task.downloadId }); } catch (_) {}
+  const ids = [...new Set([...(Array.isArray(task.downloadIds) ? task.downloadIds : []), task.downloadId].filter(Number.isInteger))];
+  for (const id of ids) {
+    try { await chrome.downloads.cancel(id); } catch (_) {}
+    try { await chrome.downloads.removeFile(id); } catch (_) {}
+    try { await chrome.downloads.erase({ id }); } catch (_) {}
   }
   await setTask(taskId, { status: 'cancelled', progress: task.progress || 0, detail: 'ההורדה בוטלה', cancelRequested: true });
   await debugLog('info', 'task.cancel.done', { taskId });
@@ -406,11 +408,8 @@ chrome.tabs.onRemoved.addListener(tabId => {
 });
 
 chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
-  // Do not claim messages addressed to the offscreen document. Returning false
-  // here lets the offscreen listener own the response channel.
   if (m?.target === 'offscreen') return false;
   (async () => {
-
     if (m?.type === 'getActiveTab') {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       sendResponse({ ok: true, tab: tab ? { id: tab.id, url: tab.url || '', title: tab.title || '' } : null });
@@ -465,7 +464,11 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
     }
     if (m?.type === 'offscreenReady') {
       const downloadId = await chrome.downloads.download({ url: m.blobUrl, filename: m.filename, conflictAction: 'uniquify', saveAs: false });
-      await setTask(m.taskId, { status: 'saving', progress: 100, downloadId, detail: 'Chrome is saving the file' });
+      const tasks = await getTasks();
+      const current = tasks[m.taskId] || {};
+      const downloadIds = [...new Set([...(Array.isArray(current.downloadIds) ? current.downloadIds : []), downloadId])];
+      const saveProgress = Number.isFinite(Number(m.progress)) ? Math.max(0, Math.min(100, Number(m.progress))) : 100;
+      await setTask(m.taskId, { status: 'saving', progress: saveProgress, downloadId, downloadIds, detail: m.detail || 'Chrome שומר את הקובץ' });
       sendResponse({ ok: true, downloadId }); return;
     }
     if (m?.type === 'offscreenReadySubtitle') {
