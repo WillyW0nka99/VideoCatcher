@@ -116,9 +116,13 @@ function parseMedia(text, baseUrl) {
   let init = null;
   let pendingRange = null;
   let lastRangeEnd = -1;
+  let pendingDuration = 0;
   const segments = [];
   for (const line of lines) {
-    if (line.startsWith('#EXT-X-MAP:')) {
+    if (line.startsWith('#EXTINF:')) {
+      const value = Number.parseFloat(line.slice(line.indexOf(':') + 1));
+      pendingDuration = Number.isFinite(value) && value > 0 ? value : 0;
+    } else if (line.startsWith('#EXT-X-MAP:')) {
       const a = attrList(line);
       if (a.URI) {
         let range = null;
@@ -137,8 +141,9 @@ function parseMedia(text, baseUrl) {
       pendingRange = { start, end: start + len - 1 };
       lastRangeEnd = pendingRange.end;
     } else if (!line.startsWith('#')) {
-      segments.push({ url: abs(baseUrl, line), range: pendingRange });
+      segments.push({ url: abs(baseUrl, line), range: pendingRange, duration: pendingDuration });
       pendingRange = null;
+      pendingDuration = 0;
     }
   }
   return { init, segments };
@@ -183,6 +188,59 @@ function patchTkhd(trak, trackId) {
 }
 function patchTrex(trex, trackId) { const out = trex.slice(); if (out.length >= 16) w32(out, 12, trackId); return out; }
 function patchMvhd(mvhd, nextTrackId) { const out = mvhd.slice(); const version = out[8]; const offset = version === 1 ? 116 : 104; if (out.length >= offset + 4) w32(out, offset, nextTrackId); return out; }
+function u64(a, o) { return (BigInt(u32(a, o)) << 32n) | BigInt(u32(a, o + 4)); }
+function w64(a, o, v) { const n=BigInt(v); w32(a,o,Number((n>>32n)&0xffffffffn)); w32(a,o+4,Number(n&0xffffffffn)); }
+function writeDurationTicks(out, offset, version, seconds, timescale) {
+  const ticks = BigInt(Math.max(0, Math.round(Number(seconds || 0) * Number(timescale || 0))));
+  if (version === 1) w64(out, offset, ticks);
+  else w32(out, offset, Number(ticks > 0xffffffffn ? 0xffffffffn : ticks));
+}
+function patchInitDuration(init, seconds) {
+  const duration = Number(seconds || 0);
+  if (!(duration > 0)) return init;
+  const out = init.slice();
+  const moov = boxes(out).find(x => x.type === 'moov');
+  if (!moov) return out;
+  const kids = boxes(out, moov.start + 8, moov.end);
+  const mvhd = kids.find(x => x.type === 'mvhd');
+  let movieTimescale = 0;
+  if (mvhd) {
+    const version = out[mvhd.start + 8];
+    const timescaleOffset = mvhd.start + (version === 1 ? 28 : 20);
+    const durationOffset = mvhd.start + (version === 1 ? 32 : 24);
+    movieTimescale = u32(out, timescaleOffset);
+    if (movieTimescale) writeDurationTicks(out, durationOffset, version, duration, movieTimescale);
+  }
+  for (const trak of kids.filter(x => x.type === 'trak')) {
+    const tkids = boxes(out, trak.start + 8, trak.end);
+    const tkhd = tkids.find(x => x.type === 'tkhd');
+    if (tkhd && movieTimescale) {
+      const version = out[tkhd.start + 8];
+      const durationOffset = tkhd.start + (version === 1 ? 36 : 28);
+      writeDurationTicks(out, durationOffset, version, duration, movieTimescale);
+    }
+    const mdia = tkids.find(x => x.type === 'mdia');
+    if (mdia) {
+      const mdhd = boxes(out, mdia.start + 8, mdia.end).find(x => x.type === 'mdhd');
+      if (mdhd) {
+        const version = out[mdhd.start + 8];
+        const timescaleOffset = mdhd.start + (version === 1 ? 28 : 20);
+        const durationOffset = mdhd.start + (version === 1 ? 32 : 24);
+        const timescale = u32(out, timescaleOffset);
+        if (timescale) writeDurationTicks(out, durationOffset, version, duration, timescale);
+      }
+    }
+  }
+  const mvex = kids.find(x => x.type === 'mvex');
+  if (mvex && movieTimescale) {
+    const mehd = boxes(out, mvex.start + 8, mvex.end).find(x => x.type === 'mehd');
+    if (mehd) {
+      const version = out[mehd.start + 8];
+      writeDurationTicks(out, mehd.start + 12, version, duration, movieTimescale);
+    }
+  }
+  return out;
+}
 function mergeInit(videoInit, audioInit) {
   const vt = boxes(videoInit), at = boxes(audioInit);
   const ftyp = vt.find(x => x.type === 'ftyp'), vmoov = vt.find(x => x.type === 'moov'), amoov = at.find(x => x.type === 'moov');
@@ -204,8 +262,6 @@ function mergeInit(videoInit, audioInit) {
   if (!insertedTrack) outKids.push(patchedAudioTrak);
   return concat([videoInit.slice(ftyp.start, ftyp.end), makeBox('moov', concat(outKids))]);
 }
-function u64(a, o) { return (BigInt(u32(a, o)) << 32n) | BigInt(u32(a, o + 4)); }
-function w64(a, o, v) { const n=BigInt(v); w32(a,o,Number((n>>32n)&0xffffffffn)); w32(a,o+4,Number(n&0xffffffffn)); }
 function fragmentTfdt(input) {
   for (const top of boxes(input)) {
     if (top.type !== 'moof') continue;
@@ -254,8 +310,8 @@ function splitIndexGroups(videoChunks, audioChunks, initSize, maxBytes) {
   if(current.length)groups.push(current);
   return groups;
 }
-function buildMp4Part(init, videoChunks, audioChunks, indices) {
-  const parts=[init]; let seq=1;
+function buildMp4Part(init, videoChunks, audioChunks, indices, durationSeconds = 0) {
+  const parts=[durationSeconds > 0 ? patchInitDuration(init, durationSeconds) : init]; let seq=1;
   const firstV=indices.map(i=>videoChunks[i]).find(Boolean);
   const firstA=audioChunks ? indices.map(i=>audioChunks[i]).find(Boolean) : null;
   const vBase=firstV?fragmentTfdt(firstV):null;
@@ -384,7 +440,10 @@ async function downloadHls(m) {
       ext='mp4';
       if(split){
         const groups=splitIndexGroups(vd.chunks,ad?.chunks||null,init.length,maxPartBytes);
-        outputs=groups.map(indices=>buildMp4Part(init,vd.chunks,ad?.chunks||null,indices));
+        outputs=groups.map(indices=>{
+          const partDuration=indices.reduce((sum,i)=>sum+Number(video.segments[i]?.duration||0),0);
+          return buildMp4Part(init,vd.chunks,ad?.chunks||null,indices,partDuration);
+        });
       }else{
         const indices=Array.from({length:Math.max(vd.chunks.length,ad?.chunks.length||0)},(_,i)=>i);
         outputs=[buildMp4Part(init,vd.chunks,ad?.chunks||null,indices)];
