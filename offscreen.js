@@ -1,6 +1,7 @@
 const PLAYLIST_TIMEOUT_MS = 15000;
 const SEGMENT_TIMEOUT_MS = 25000;
 const RETRIES = 3;
+const DEFAULT_SPLIT_BYTES = 195000000;
 const activeJobs = new Map();
 
 function abs(base, value) { return new URL(value, base).href; }
@@ -203,17 +204,78 @@ function mergeInit(videoInit, audioInit) {
   if (!insertedTrack) outKids.push(patchedAudioTrak);
   return concat([videoInit.slice(ftyp.start, ftyp.end), makeBox('moov', concat(outKids))]);
 }
-function patchFragment(input, trackId, sequence) {
+function u64(a, o) { return (BigInt(u32(a, o)) << 32n) | BigInt(u32(a, o + 4)); }
+function w64(a, o, v) { const n=BigInt(v); w32(a,o,Number((n>>32n)&0xffffffffn)); w32(a,o+4,Number(n&0xffffffffn)); }
+function fragmentTfdt(input) {
+  for (const top of boxes(input)) {
+    if (top.type !== 'moof') continue;
+    for (const child of boxes(input, top.start + 8, top.end)) {
+      if (child.type !== 'traf') continue;
+      for (const sub of boxes(input, child.start + 8, child.end)) {
+        if (sub.type !== 'tfdt' || sub.size < 16) continue;
+        const version=input[sub.start+8];
+        return version===1 ? u64(input,sub.start+12) : BigInt(u32(input,sub.start+12));
+      }
+    }
+  }
+  return null;
+}
+function patchFragment(input, trackId, sequence, timeOffset = null) {
   const out = input.slice();
   for (const top of boxes(out)) {
     if (top.type !== 'moof') continue;
     for (const child of boxes(out, top.start + 8, top.end)) {
       if (child.type === 'mfhd' && child.size >= 16) w32(out, child.start + 12, sequence);
       if (child.type !== 'traf') continue;
-      for (const sub of boxes(out, child.start + 8, child.end)) if (sub.type === 'tfhd' && sub.size >= 16) w32(out, sub.start + 12, trackId);
+      for (const sub of boxes(out, child.start + 8, child.end)) {
+        if (sub.type === 'tfhd' && sub.size >= 16) w32(out, sub.start + 12, trackId);
+        if (sub.type === 'tfdt' && sub.size >= 16 && timeOffset != null) {
+          const version=out[sub.start+8];
+          const current=version===1 ? u64(out,sub.start+12) : BigInt(u32(out,sub.start+12));
+          const shifted=current>=timeOffset ? current-timeOffset : 0n;
+          if (version===1) w64(out,sub.start+12,shifted); else w32(out,sub.start+12,Number(shifted & 0xffffffffn));
+        }
+      }
     }
   }
   return out;
+}
+
+function splitIndexGroups(videoChunks, audioChunks, initSize, maxBytes) {
+  const limit=Math.max(1000000,Number(maxBytes)||DEFAULT_SPLIT_BYTES);
+  const n=Math.max(videoChunks.length,audioChunks?.length||0);
+  const groups=[]; let current=[]; let bytes=initSize;
+  for(let i=0;i<n;i++){
+    const add=(videoChunks[i]?.length||0)+(audioChunks?.[i]?.length||0);
+    if(current.length && bytes+add>limit){groups.push(current);current=[];bytes=initSize;}
+    if(initSize+add>limit && !current.length) throw new Error('מקטע מדיה בודד גדול מדי לפיצול בגבול שנבחר.');
+    current.push(i);bytes+=add;
+  }
+  if(current.length)groups.push(current);
+  return groups;
+}
+function buildMp4Part(init, videoChunks, audioChunks, indices) {
+  const parts=[init]; let seq=1;
+  const firstV=indices.map(i=>videoChunks[i]).find(Boolean);
+  const firstA=audioChunks ? indices.map(i=>audioChunks[i]).find(Boolean) : null;
+  const vBase=firstV?fragmentTfdt(firstV):null;
+  const aBase=firstA?fragmentTfdt(firstA):null;
+  for(const i of indices){
+    if(videoChunks[i])parts.push(patchFragment(videoChunks[i],1,seq++,vBase));
+    if(audioChunks?.[i])parts.push(patchFragment(audioChunks[i],2,seq++,aBase));
+  }
+  return concat(parts);
+}
+function buildTsParts(chunks,maxBytes){
+  const limit=Math.max(1000000,Number(maxBytes)||DEFAULT_SPLIT_BYTES);
+  const groups=[];let cur=[];let size=0;
+  for(const chunk of chunks){
+    if(cur.length&&size+chunk.length>limit){groups.push(cur);cur=[];size=0;}
+    if(chunk.length>limit)throw new Error('מקטע מדיה בודד גדול מדי לפיצול בגבול שנבחר.');
+    cur.push(chunk);size+=chunk.length;
+  }
+  if(cur.length)groups.push(cur);
+  return groups.map(concat);
 }
 
 async function parallelDownload(items, onProgress, concurrency = 3, phase = 'media', taskId = '') {
@@ -267,10 +329,12 @@ async function analyzeHls(url) {
 
 async function downloadHls(m) {
   const { taskId, variantUrl, audioUrl, title, quality } = m;
-  const job = { cancelled: false, controllers: new Set() };
+  const split=!!m.split;
+  const maxPartBytes=split?Math.max(1000000,Number(m.maxPartBytes)||DEFAULT_SPLIT_BYTES):0;
+  const job = { cancelled: false, controllers: new Set(), blobUrls: new Set() };
   activeJobs.set(taskId, job);
   try {
-    await debug('info', 'hls.download.start', { taskId, variantUrl, audioUrl, quality });
+    await debug('info', 'hls.download.start', { taskId, variantUrl, audioUrl, quality, split, maxPartBytes });
     await progress(taskId, 'preparing', 2, 'פותח את רשימות המדיה…');
 
     const [videoText, audioText] = await Promise.all([
@@ -312,41 +376,54 @@ async function downloadHls(m) {
     if (job.cancelled) throw new Error('ההורדה בוטלה.');
     const bytes = initBytes + vd.bytes + (ad?.bytes || 0);
 
-    await progress(taskId, 'assembling', 90, audio ? 'מחבר וידאו ואודיו…' : 'מחבר את מקטעי הווידאו…', bytes);
-    let finalBytes, ext;
+    await progress(taskId, 'assembling', 90, split ? 'מחלק את הסרטון לקבצים…' : (audio ? 'מחבר וידאו ואודיו…' : 'מחבר את מקטעי הווידאו…'), bytes);
+
+    let outputs=[]; let ext;
     if (videoInit) {
-      if (audio && audioInit) {
-        const init = mergeInit(videoInit, audioInit);
-        const parts = [init]; let seq = 1; const n = Math.max(vd.chunks.length, ad.chunks.length);
-        for (let i = 0; i < n; i++) { if (vd.chunks[i]) parts.push(patchFragment(vd.chunks[i], 1, seq++)); if (ad.chunks[i]) parts.push(patchFragment(ad.chunks[i], 2, seq++)); }
-        finalBytes = concat(parts);
-      } else {
-        const parts = [videoInit]; let seq = 1; for (const seg of vd.chunks) parts.push(patchFragment(seg, 1, seq++)); finalBytes = concat(parts);
+      const init = audio && audioInit ? mergeInit(videoInit, audioInit) : videoInit;
+      ext='mp4';
+      if(split){
+        const groups=splitIndexGroups(vd.chunks,ad?.chunks||null,init.length,maxPartBytes);
+        outputs=groups.map(indices=>buildMp4Part(init,vd.chunks,ad?.chunks||null,indices));
+      }else{
+        const indices=Array.from({length:Math.max(vd.chunks.length,ad?.chunks.length||0)},(_,i)=>i);
+        outputs=[buildMp4Part(init,vd.chunks,ad?.chunks||null,indices)];
       }
-      ext = 'mp4';
     } else {
       if (audio) throw new Error('מבנה הזרם הזה אינו נתמך למיזוג ישיר בדפדפן.');
-      finalBytes = concat(vd.chunks); ext = 'ts';
+      ext='ts';
+      outputs=split?buildTsParts(vd.chunks,maxPartBytes):[concat(vd.chunks)];
     }
     if (job.cancelled) throw new Error('ההורדה בוטלה.');
 
-    await progress(taskId, 'assembling', 96, `יוצר קובץ ${quality || ''}…`, finalBytes.length);
-    await debug('info', 'hls.assemble.ok', { taskId, bytes: finalBytes.length, ext });
-    const blob = new Blob([finalBytes], { type: ext === 'mp4' ? 'video/mp4' : 'video/mp2t' });
-    const blobUrl = URL.createObjectURL(blob);
-    job.blobUrl = blobUrl;
-    const filename = sanitizeFilename(`${title || 'וידאו'}${quality ? ` - ${quality}` : ''}`, ext);
-    const r = await chrome.runtime.sendMessage({ type: 'offscreenReady', taskId, blobUrl, filename });
-    if (!r?.ok) throw new Error(r?.error || 'לא ניתן להתחיל את שמירת הקובץ בדפדפן.');
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 120000);
-    await chrome.runtime.sendMessage({ type: 'offscreenDone', taskId, ok: true, detail: 'ההורדה הועברה ל-Chrome' });
+    const totalParts=outputs.length;
+    const totalOutputBytes=outputs.reduce((n,x)=>n+x.length,0);
+    await debug('info', 'hls.assemble.ok', { taskId, bytes: totalOutputBytes, ext, split, partCount: totalParts, partBytes: outputs.map(x=>x.length) });
+
+    for(let i=0;i<outputs.length;i++){
+      if(job.cancelled)throw new Error('ההורדה בוטלה.');
+      const out=outputs[i];
+      const num=String(i+1).padStart(2,'0'), total=String(totalParts).padStart(2,'0');
+      const suffix=split&&totalParts>1?` - part-${num}-of-${total}`:'';
+      const filename=sanitizeFilename(`${title || 'וידאו'}${quality ? ` - ${quality}` : ''}${suffix}`,ext);
+      const savePct=96+Math.round(3*((i+1)/Math.max(1,totalParts)));
+      await progress(taskId,'assembling',savePct,split?`יוצר חלק ${i+1} מתוך ${totalParts}…`:`יוצר קובץ ${quality || ''}…`,out.length);
+      const blob=new Blob([out],{type:ext==='mp4'?'video/mp4':'video/mp2t'});
+      const blobUrl=URL.createObjectURL(blob);
+      job.blobUrls.add(blobUrl);
+      const r=await chrome.runtime.sendMessage({type:'offscreenReady',taskId,blobUrl,filename,progress:savePct,detail:split?`שומר חלק ${i+1} מתוך ${totalParts}`:'Chrome שומר את הקובץ'});
+      if(!r?.ok)throw new Error(r?.error||'לא ניתן להתחיל את שמירת הקובץ בדפדפן.');
+      setTimeout(()=>{try{URL.revokeObjectURL(blobUrl)}catch(_){} job.blobUrls.delete(blobUrl);},120000);
+      outputs[i]=null;
+    }
+    await chrome.runtime.sendMessage({ type: 'offscreenDone', taskId, ok: true, detail: split&&totalParts>1 ? `נשמרו ${totalParts} חלקים` : 'ההורדה הועברה ל-Chrome' });
   } catch (e) {
     const cancelled = job.cancelled || String(e?.message || e).toLowerCase().includes('cancel');
     await debug(cancelled ? 'info' : 'error', cancelled ? 'hls.download.cancelled' : 'hls.download.failed', { taskId, variantUrl, audioUrl, error: String(e?.message || e), stack: String(e?.stack || '') });
     if (!cancelled) await chrome.runtime.sendMessage({ type: 'offscreenDone', taskId, ok: false, error: String(e?.message || e) });
   } finally {
     const j = activeJobs.get(taskId);
-    if (j?.blobUrl && j.cancelled) try { URL.revokeObjectURL(j.blobUrl); } catch (_) {}
+    if (j?.cancelled) for (const url of j.blobUrls || []) try { URL.revokeObjectURL(url); } catch (_) {}
     activeJobs.delete(taskId);
   }
 }
@@ -357,7 +434,8 @@ function cancelHls(taskId) {
   job.cancelled = true;
   for (const controller of job.controllers) try { controller.abort('cancelled'); } catch (_) {}
   job.controllers.clear();
-  if (job.blobUrl) try { URL.revokeObjectURL(job.blobUrl); } catch (_) {}
+  for (const url of job.blobUrls || []) try { URL.revokeObjectURL(url); } catch (_) {}
+  job.blobUrls?.clear();
   debug('info', 'hls.cancel.received', { taskId }).catch(()=>{});
   return { ok: true };
 }
@@ -373,7 +451,6 @@ function parseSubtitlePlaylist(text, baseUrl) {
   const lines = text.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
   return lines.filter(x => !x.startsWith('#')).map(x => abs(baseUrl, x));
 }
-
 
 function subtitleTextSample(text) {
   return String(text || '')
