@@ -69,6 +69,18 @@ async function putStreamsStore(store) {
   await chrome.storage.local.set({ [STREAMS_KEY]: store });
 }
 
+async function clearStreamsForTab(tabId) {
+  if (!Number.isInteger(tabId) || tabId < 0) return;
+  const store = await getStreamsStore();
+  delete store[String(tabId)];
+  await putStreamsStore(store);
+  await chrome.action.setBadgeText({ tabId, text: '' }).catch(() => {});
+}
+
+function notifyTabContextChanged(data) {
+  chrome.runtime.sendMessage({ target: 'ui', type: 'tabContextChanged', ...data }).catch(() => {});
+}
+
 function stableKey(item) {
   if (item.type === 'fragment') {
     const m = item.url.match(/\/avf\/([0-9a-f-]+)\.mp4/i);
@@ -293,7 +305,7 @@ async function setTask(taskId, patch) {
   const tasks = await getTasks();
   tasks[taskId] = { ...(tasks[taskId] || {}), ...patch, updatedAt: now() };
   await chrome.storage.local.set({ [TASKS_KEY]: tasks });
-  if (patch.status || patch.detail) debugLog(patch.status === 'error' ? 'error' : 'info', 'task.update', { taskId, status: tasks[taskId].status, progress: tasks[taskId].progress, detail: tasks[taskId].detail }).catch(() => {});
+  if (patch.status || patch.detail) debugLog(patch.status === 'error' ? 'error' : 'info', 'task.update', { taskId, status: tasks[taskId].status, progress: tasks[taskId].progress, detail: tasks[taskId].detail, tabId: tasks[taskId].tabId ?? null, pageUrl: tasks[taskId].pageUrl || '' }).catch(() => {});
   chrome.runtime.sendMessage({ target: 'ui', type: 'taskUpdate', task: tasks[taskId] }).catch(() => {});
   return tasks[taskId];
 }
@@ -311,7 +323,9 @@ async function startHlsDownload(payload) {
     title: payload.title || 'וידאו',
     quality: payload.quality || '',
     split: !!payload.split,
-    maxPartBytes: Math.max(0, Number(payload.maxPartBytes || 0))
+    maxPartBytes: Math.max(0, Number(payload.maxPartBytes || 0)),
+    tabId: Number.isInteger(payload.tabId) ? payload.tabId : null,
+    pageUrl: payload.pageUrl || ''
   };
   await debugLog('info', 'hls.download.request', job);
   await ensureOffscreen();
@@ -324,6 +338,8 @@ async function startHlsDownload(payload) {
     quality: job.quality,
     split: job.split,
     maxPartBytes: job.maxPartBytes,
+    tabId: job.tabId,
+    pageUrl: job.pageUrl,
     downloadIds: [],
     startedAt: now()
   });
@@ -406,19 +422,33 @@ chrome.downloads.onChanged.addListener(async delta => {
   } catch (_) {}
 });
 
+chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  notifyTabContextChanged({ reason: 'activated', tabId, windowId });
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.url) {
+    clearStreamsForTab(tabId).catch(() => {});
+    debugLog('info', 'tab.url.changed', { tabId, url: changeInfo.url }).catch(() => {});
+    notifyTabContextChanged({ reason: 'url', tabId, windowId: tab.windowId, url: changeInfo.url });
+  } else if (changeInfo.title) {
+    notifyTabContextChanged({ reason: 'title', tabId, windowId: tab.windowId });
+  }
+});
+
 chrome.tabs.onRemoved.addListener(tabId => {
-  getStreamsStore().then(store => {
-    delete store[String(tabId)];
-    return putStreamsStore(store);
-  }).catch(() => {});
+  clearStreamsForTab(tabId).catch(() => {});
 });
 
 chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
   if (m?.target === 'offscreen') return false;
   (async () => {
     if (m?.type === 'getActiveTab') {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      sendResponse({ ok: true, tab: tab ? { id: tab.id, url: tab.url || '', title: tab.title || '' } : null });
+      const query = { active: true };
+      if (Number.isInteger(m.windowId)) query.windowId = m.windowId;
+      else query.currentWindow = true;
+      const [tab] = await chrome.tabs.query(query);
+      sendResponse({ ok: true, tab: tab ? { id: tab.id, windowId: tab.windowId, index: tab.index, url: tab.url || '', title: tab.title || '' } : null });
       return;
     }
     if (m?.type === 'scanTab') {
@@ -430,9 +460,7 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
       sendResponse({ ok: true, items: store[String(m.tabId)] || [] }); return;
     }
     if (m?.type === 'clearStreams') {
-      const store = await getStreamsStore();
-      delete store[String(m.tabId)];
-      await putStreamsStore(store);
+      await clearStreamsForTab(Number(m.tabId));
       sendResponse({ ok: true }); return;
     }
     if (m?.type === 'downloadDirect') {
