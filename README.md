@@ -158,4 +158,4 @@ chrome://extensions
 
 <hr>
 
-<p dir="rtl"><strong>גרסה נוכחית:</strong> <code dir="ltr">v0.6.0</code></p>
+<p dir="rtl"><strong>גרסה נוכחית:</strong> <code dir="ltr">v0.6.1</code></p>
