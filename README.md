@@ -48,28 +48,52 @@
 
 <h2 dir="rtl">התקנה</h2>
 
-<p dir="rtl">התוסף עדיין אינו מופץ דרך <span dir="ltr">Chrome Web Store</span>, ולכן ההתקנה מתבצעת ידנית.</p>
+<p dir="rtl">התוסף עדיין אינו מופץ דרך <span dir="ltr">Chrome Web Store</span>, ולכן יש להתקין אותו ידנית באמצעות מצב מפתח של Chrome.</p>
 
-<h3 dir="rtl">התקנה דרך GitHub</h3>
+<h3 dir="rtl">1. הורדת התוסף</h3>
 
 <ol dir="rtl">
-  <li>לחץ למעלה על <span dir="ltr"><strong>Code → Download ZIP</strong></span>.</li>
-  <li>חלץ את קובץ ה־<span dir="ltr">ZIP</span> לתיקייה קבועה במחשב.</li>
-  <li>פתח ב־Chrome את הכתובת הבאה:</li>
+  <li>פתח את עמוד <a href="https://github.com/WillyW0nka99/VideoCatcher/releases"><span dir="ltr">Releases</span></a> של הפרויקט.</li>
+  <li>פתח את הגרסה שמסומנת <span dir="ltr"><strong>Latest</strong></span>.</li>
+  <li>תחת <span dir="ltr"><strong>Assets</strong></span>, הורד את קובץ ה־<span dir="ltr">ZIP</span> של <span dir="ltr">Video Catcher</span>.</li>
+  <li>חלץ את קובץ ה־<span dir="ltr">ZIP</span> לתיקייה קבועה במחשב. אין לנסות להתקין את התוסף ישירות מתוך קובץ ה־ZIP.</li>
+</ol>
+
+<h3 dir="rtl">2. הפעלת מצב מפתח ב־Chrome</h3>
+
+<ol dir="rtl">
+  <li>פתח לשונית חדשה ב־Chrome.</li>
+  <li>בשורת הכתובת הקלד את הכתובת הבאה ולחץ Enter:</li>
 </ol>
 
 ```text
 chrome://extensions
 ```
 
-<ol dir="rtl" start="4">
-  <li>הפעל את <span dir="ltr"><strong>Developer mode</strong></span>.</li>
-  <li>לחץ על <span dir="ltr"><strong>Load unpacked</strong></span>.</li>
-  <li>בחר את התיקייה שחילצת — התיקייה שבה נמצא <code dir="ltr">manifest.json</code>.</li>
-  <li>מומלץ להצמיד את <span dir="ltr">Video Catcher</span> לסרגל הכלים דרך תפריט התוספים של Chrome.</li>
+<ol dir="rtl" start="3">
+  <li>ייפתח עמוד <strong>ניהול התוספים</strong> של Chrome.</li>
+  <li>בחלק העליון של העמוד חפש את המתג <span dir="ltr"><strong>Developer mode</strong></span> — בעברית הוא עשוי להופיע כ־<strong>מצב מפתח</strong>.</li>
+  <li>העבר את המתג למצב פעיל. לאחר ההפעלה יופיעו בחלק העליון של העמוד כפתורים נוספים, ביניהם <span dir="ltr"><strong>Load unpacked</strong></span>.</li>
 </ol>
 
-<p dir="rtl"><strong>חשוב:</strong> אל תמחק או תעביר את תיקיית התוסף לאחר ההתקנה. Chrome טוען את התוסף ישירות ממנה.</p>
+<h3 dir="rtl">3. טעינת Video Catcher</h3>
+
+<ol dir="rtl">
+  <li>לחץ על <span dir="ltr"><strong>Load unpacked</strong></span> — בעברית הוא עשוי להופיע כ־<strong>טעינת תוסף שלא נארז</strong>.</li>
+  <li>בחלון בחירת התיקייה, בחר את התיקייה שחילצת בשלב הראשון.</li>
+  <li><strong>חשוב:</strong> יש לבחור את התיקייה שבה נמצא הקובץ <code dir="ltr">manifest.json</code> ישירות. אם <code dir="ltr">manifest.json</code> נמצא בתוך תיקיית משנה, היכנס אליה ובחר אותה.</li>
+  <li>לאחר הבחירה, <span dir="ltr">Video Catcher</span> אמור להופיע ברשימת התוספים ולהיות פעיל.</li>
+</ol>
+
+<h3 dir="rtl">4. הצמדת התוסף לסרגל הכלים</h3>
+
+<ol dir="rtl">
+  <li>לחץ על סמל התוספים של Chrome ליד שורת הכתובת.</li>
+  <li>מצא את <span dir="ltr">Video Catcher</span>.</li>
+  <li>לחץ על סמל הנעץ כדי שהאייקון של התוסף יישאר גלוי בסרגל הכלים.</li>
+</ol>
+
+<p dir="rtl"><strong>חשוב:</strong> אל תמחק, תשנה את השם או תעביר את תיקיית התוסף לאחר ההתקנה. Chrome טוען את התוסף ישירות מהתיקייה הזאת.</p>
 
 <h2 dir="rtl">שימוש</h2>
 
