@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Video Catcher",
+  "version": "0.5.1",
+  "description": "מזהה זרמי וידאו בדפים נתמכים ומאפשר לשמור וידאו וכתוביות למחשב מתוך הדפדפן.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "webRequest",
+    "storage",
+    "scripting",
+    "downloads",
+    "sidePanel",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "https://*.ac.il/*",
+    "https://*.vimeo.com/*",
+    "https://*.vimeocdn.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Video Catcher",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Video Catcher</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <div class="brandrow">
+        <div class="logo" aria-hidden="true"><img src="icons/icon.svg" alt=""></div>
+        <div>
+          <h1>Video Catcher</h1>
+          <div class="sub">שמירת וידאו מתוך הדפדפן</div>
+        </div>
+        <button class="iconbtn" id="refresh" title="סריקה מחדש">↻</button>
+      </div>
+      <div class="page" id="pageLine">מחפש וידאו בעמוד…</div>
+    </header>
+
+    <main>
+      <section id="statusCard" class="statusCard">
+        <div class="pulse"></div>
+        <div>
+          <strong id="statusTitle">סורק את העמוד</strong>
+          <div id="statusText">הפעל את הסרטון אם עדיין לא הופעל.</div>
+        </div>
+      </section>
+
+      <section id="videoCard" class="videoCard hidden">
+        <div id="thumbWrap" class="thumb hidden"><img id="thumb" alt=""></div>
+        <div class="videoHead">
+          <div>
+            <div class="eyebrow">וידאו</div>
+            <h2 id="videoTitle">וידאו</h2>
+            <div class="meta" id="videoMeta"></div>
+          </div>
+          <span id="sourceBadge" class="pill">זוהה</span>
+        </div>
+
+        <div class="field">
+          <label for="quality">איכות</label>
+          <select id="quality"></select>
+        </div>
+
+        <button id="download" class="primary">
+          <span class="downloadIcon">↓</span>
+          <span id="downloadText">הורד וידאו</span>
+        </button>
+
+        <div id="subtitleSection" class="subtitleSection hidden">
+          <div class="subtitleTop">
+            <div><strong>כתוביות</strong><span id="subtitleCount"></span></div>
+            <select id="subtitleSelect"></select>
+          </div>
+          <button id="downloadSubtitle" class="secondary full">↓ הורד כתוביות</button>
+        </div>
+
+        <div id="progressBox" class="progressBox hidden">
+          <div class="progressTop"><span id="progressLabel">מוריד…</span><span id="progressPct">0%</span></div>
+          <div class="track"><div id="bar" class="bar"></div></div>
+          <div id="progressDetail" class="progressDetail"></div>
+          <button id="cancelDownload" class="cancelbtn hidden">בטל הורדה</button>
+          <div id="stallHint" class="stallHint hidden">לא התקבל עדכון זמן מה. אם ההורדה לא מתקדמת, הורד דוח אבחון ושלח אותו לבדיקה.</div>
+        </div>
+      </section>
+
+      <section id="empty" class="empty hidden">
+        <div class="emptyIcon">◌</div>
+        <h3>עדיין לא נמצא וידאו מלא</h3>
+        <p>חזור לעמוד השיעור, הפעל את הסרטון לכמה שניות ואז לחץ על סריקה מחדש.</p>
+        <button id="scanAgain" class="secondary">סריקה מחדש</button>
+      </section>
+
+      <details class="advanced">
+        <summary>פרטים טכניים</summary>
+        <div id="tech"></div>
+        <div class="techActions">
+          <button id="downloadDebug" class="debugbtn">↓ הורד דוח אבחון</button>
+          <button id="clear" class="textbtn">נקה זיהויים</button>
+        </div>
+      </details>
+    </main>
+    <footer class="footerInfo">
+      <div class="version" id="versionLabel"></div>
+      <div class="privacyNote">פרטיות: העיבוד מתבצע מקומית בדפדפן. כתובות העמוד והמדיה משמשות רק לזיהוי ולהורדה ואינן נשלחות למפתח התוסף.</div>
+      <div class="disclaimer">השימוש בתוסף הוא באחריות המשתמש בלבד ובכפוף לתנאי השימוש של האתר בו אתם גולשים. ייתכן שהתכנים מוגנים בזכויות יוצרים. אין להעתיק, להפיץ או לשתף תוכן ללא הרשאה מתאימה מבעל הזכויות.</div>
+    </footer>
+  </div>
+  <script src="sidepanel.js"></script>
+</body>
+</html>
