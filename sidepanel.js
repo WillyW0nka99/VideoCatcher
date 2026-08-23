@@ -7,8 +7,24 @@ let currentTaskId = null;
 let currentDirectDownloadId = null;
 let lastTaskUpdateAt = 0;
 let currentTaskStatus = '';
+let contextKey = '';
+let panelWindowId = null;
 const MAX_SPLIT_BYTES = 195000000;
 
+function normalizePageUrl(url){
+  try{const u=new URL(String(url||''));u.hash='';return u.href}catch(_){return String(url||'')}
+}
+function contextKeyFor(tab){return tab?.id!=null?`${tab.id}|${normalizePageUrl(tab.url||'')}`:'';}
+async function getPanelWindowId(){
+  if(panelWindowId!=null)return panelWindowId;
+  try{const w=await chrome.windows.getCurrent();panelWindowId=w?.id??null}catch(_){}
+  return panelWindowId;
+}
+async function getActiveTabSnapshot(){
+  const windowId=await getPanelWindowId();
+  const r=await chrome.runtime.sendMessage({type:'getActiveTab',windowId}).catch(()=>null);
+  return r?.tab||null;
+}
 function fmtDuration(sec){ if(!sec)return ''; sec=Math.round(sec); const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60; return h?`${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`:`${m}:${String(s).padStart(2,'0')}`; }
 function fmtSize(bytes){ if(!bytes)return ''; const mb=bytes/1e6; return mb>=1000?`${(mb/1000).toFixed(1)} GB`:`${Math.round(mb)} MB`; }
 function estimateSize(choice){ const duration=Number(choice?.item?.duration||0); const bitrate=Number(choice?.bitrate||0); return duration&&bitrate ? duration*bitrate/8 : 0; }
@@ -30,12 +46,73 @@ function toggleSplitInfo(){
   help.classList.toggle('hidden',!show);
   $('splitInfo').setAttribute('aria-expanded',show?'true':'false');
 }
+function renderTabContext(tab){
+  const number=Number.isInteger(tab?.index)?tab.index+1:null;
+  $('tabContextLabel').textContent=number?`טאב ${number} • נסרק כעת`:'הטאב הפעיל • נסרק כעת';
+  $('tabTitle').textContent=tab?.title||'ללא כותרת';
+  $('pageLine').textContent=tab?.url||'כתובת לא זמינה';
+}
+function resetContextUi(){
+  currentTaskId=null;
+  currentDirectDownloadId=null;
+  lastTaskUpdateAt=0;
+  currentTaskStatus='';
+  allItems=[];
+  choices=[];
+  subtitles=[];
+  $('downloadText').textContent='הורד וידאו';
+  $('download').disabled=false;
+  setCancelVisible(false);
+  $('progressBox').classList.add('hidden');
+  $('stallHint').classList.add('hidden');
+  $('bar').style.width='0%';
+  $('progressPct').textContent='0%';
+  $('progressLabel').textContent='מוריד…';
+  $('progressDetail').textContent='';
+  $('videoCard').classList.add('hidden');
+  $('empty').classList.add('hidden');
+  $('subtitleSection').classList.add('hidden');
+  $('tech').textContent='';
+}
+
+async function syncActiveTab({scanAfter=false}={}){
+  const next=await getActiveTabSnapshot();
+  const prev=activeTab;
+  const nextKey=contextKeyFor(next);
+  const changed=nextKey!==contextKey;
+  const sameTabUrlChanged=prev?.id!=null&&prev.id===next?.id&&normalizePageUrl(prev.url)!==normalizePageUrl(next?.url);
+  activeTab=next;
+  if(changed){
+    contextKey=nextKey;
+    resetContextUi();
+    if(sameTabUrlChanged&&next?.id!=null){
+      await chrome.runtime.sendMessage({type:'clearStreams',tabId:next.id}).catch(()=>null);
+    }
+  }
+  renderTabContext(next);
+  if(!next?.id){setStatus('אין טאב פעיל','פתח עמוד נתמך ונסה שוב.');return false;}
+  if(scanAfter)await scanCurrentTab();
+  return true;
+}
+
+async function scanCurrentTab(){
+  if(!activeTab?.id)return;
+  const expectedKey=contextKey;
+  setStatus('סורק את הטאב הפעיל','מחפש וידאו וכתובות מדיה בטאב שמופיע למעלה…');
+  await chrome.runtime.sendMessage({type:'scanTab',tabId:activeTab.id}).catch(()=>null);
+  if(expectedKey!==contextKey)return;
+  const latest=await getActiveTabSnapshot();
+  if(contextKeyFor(latest)!==expectedKey){
+    await syncActiveTab();
+    if(activeTab?.id)await scanCurrentTab();
+    return;
+  }
+  await loadStreams(expectedKey);
+}
 
 async function scan(){
-  if(!activeTab?.id)return;
-  setStatus('סורק את העמוד','מחפש וידאו וכתובות מדיה חתומות…');
-  await chrome.runtime.sendMessage({type:'scanTab',tabId:activeTab.id}).catch(()=>null);
-  await loadStreams();
+  const ok=await syncActiveTab();
+  if(ok)await scanCurrentTab();
 }
 
 function subtitleTrackId(sub){
@@ -96,14 +173,16 @@ function subtitleDisplay(sub){
   return `${lang}${auto?' • אוטומטי':''}`;
 }
 
-async function loadStreams(){
+async function loadStreams(expectedKey=contextKey){
   const r=await chrome.runtime.sendMessage({type:'getStreams',tabId:activeTab.id});
+  if(expectedKey!==contextKey)return;
   allItems=r?.items||[];
   $('tech').textContent=allItems.map(x=>{let u='';try{const p=new URL(x.url);u=`${p.origin}${p.pathname}`}catch(_){u='כתובת לא זמינה'}return `${x.type.padEnd(8)} ${x.quality||x.language||''}\n${u}`}).join('\n\n');
-  await buildChoices();
+  await buildChoices(expectedKey);
 }
 
-async function buildChoices(){
+async function buildChoices(expectedKey=contextKey){
+  if(expectedKey!==contextKey)return;
   choices=[]; subtitles=[];
   allItems.filter(x=>x.type==='subtitle').forEach(x=>addSubtitle({url:x.url,label:x.label||'כתוביות',language:x.language||'',kind:x.subtitleKind||'',source:x.source||''}));
   const mp4s=allItems.filter(x=>x.type==='mp4' && x.url && !/[?&]range=\d+-\d+/i.test(x.url) && !/\/v2\/range\/prot\//i.test(x.url));
@@ -112,6 +191,7 @@ async function buildChoices(){
   const hls=allItems.find(x=>x.type==='hls');
   if(hls){
     const ar=await chrome.runtime.sendMessage({type:'analyzeHls',url:hls.url}).catch(e=>({ok:false,error:String(e)}));
+    if(expectedKey!==contextKey)return;
     if(ar?.ok){
       for(const v of ar.variants||[]){
         choices.push({kind:'hls',label:v.quality||'HLS',height:v.height||0,bitrate:v.bandwidth||0,item:hls,variant:v});
@@ -122,6 +202,7 @@ async function buildChoices(){
   }
   subtitles=dedupeSubtitles(subtitles);
   if(subtitles.length) await inspectSubtitles();
+  if(expectedKey!==contextKey)return;
   const map=new Map();
   for(const c of choices.sort((a,b)=>(b.height-a.height)||(a.kind==='direct'?-1:1))){
     const key=`${c.height||c.label}`;
@@ -131,6 +212,7 @@ async function buildChoices(){
     if(c.kind==='hls'&&cur.kind==='direct'&&!cur.hlsAlternative) cur.hlsAlternative=c;
   }
   choices=[...map.values()].sort((a,b)=>(b.height-a.height)||(b.bitrate-a.bitrate));
+  if(expectedKey!==contextKey)return;
   render();
 }
 
@@ -170,7 +252,7 @@ async function doDownload(){
       currentDirectDownloadId=r.downloadId; currentTaskStatus='downloading'; setProgress(10,'מוריד','ההורדה מתבצעת דרך מנהל ההורדות של הדפדפן.'); $('downloadText').textContent='מוריד…';
     }else{
       setProgress(1,'מתחיל',splitRequested?'מכין הורדה מפוצלת…':'פותח את רשימות המדיה…');
-      const v=c.variant;const r=await chrome.runtime.sendMessage({type:'startHlsDownload',variantUrl:v.url,audioUrl:v.audio?.url||'',title:titleFor(c.item),quality:selected.label||c.label,split:splitRequested,maxPartBytes:splitRequested?MAX_SPLIT_BYTES:0});
+      const v=c.variant;const r=await chrome.runtime.sendMessage({type:'startHlsDownload',variantUrl:v.url,audioUrl:v.audio?.url||'',title:titleFor(c.item),quality:selected.label||c.label,split:splitRequested,maxPartBytes:splitRequested?MAX_SPLIT_BYTES:0,tabId:activeTab?.id,pageUrl:activeTab?.url||''});
       if(!r?.ok)throw new Error(r?.error||'לא ניתן להתחיל את הורדת הווידאו');
       currentTaskId=r.taskId;$('downloadText').textContent='מוריד…';
     }
@@ -196,6 +278,11 @@ async function downloadSubtitle(){
 
 chrome.runtime.onMessage.addListener(m=>{
   if(m?.target!=='ui')return;
+  if(m.type==='tabContextChanged'){
+    if(activeTab?.windowId!=null&&m.windowId!=null&&activeTab.windowId!==m.windowId)return;
+    syncActiveTab({scanAfter:m.reason!=='title'}).catch(()=>{});
+    return;
+  }
   if(m.type==='directDownloadUpdate'){
     const d=m.download;if(!Number.isInteger(currentDirectDownloadId)||d.id!==currentDirectDownloadId)return;
     lastTaskUpdateAt=Date.now();
@@ -211,7 +298,12 @@ chrome.runtime.onMessage.addListener(m=>{
     }
     return;
   }
-  if(m.type!=='taskUpdate')return;const t=m.task;if(currentTaskId&&t.id!==currentTaskId)return;currentTaskId=t.id;currentTaskStatus=t.status;lastTaskUpdateAt=Date.now();$('stallHint').classList.add('hidden');
+  if(m.type!=='taskUpdate')return;
+  const t=m.task;
+  if(Number.isInteger(t?.tabId)&&Number.isInteger(activeTab?.id)&&t.tabId!==activeTab.id)return;
+  if(t?.pageUrl&&activeTab?.url&&normalizePageUrl(t.pageUrl)!==normalizePageUrl(activeTab.url))return;
+  if(currentTaskId&&t.id!==currentTaskId)return;
+  currentTaskId=t.id;currentTaskStatus=t.status;lastTaskUpdateAt=Date.now();$('stallHint').classList.add('hidden');
   const labels={starting:'מתחיל',preparing:'מכין',downloading:'מוריד',assembling:'מעבד וידאו',saving:'שומר',done:'הושלם',error:'שגיאה',cancelling:'מבטל',cancelled:'בוטל'};setProgress(t.progress||0,labels[t.status]||t.status,t.detail||'');
   const active=['starting','preparing','downloading','assembling','saving','cancelling'].includes(t.status);setCancelVisible(active);
   if(t.status==='done'){$('downloadText').textContent='הורד שוב';$('download').disabled=false;setCancelVisible(false)}
@@ -223,12 +315,13 @@ setInterval(()=>{if(!['starting','preparing','downloading','assembling','saving'
 
 async function downloadDebug(){
   const r=await chrome.runtime.sendMessage({type:'getDebugBundle',tabId:activeTab?.id}).catch(e=>({ok:false,error:String(e)}));
-  const payload={exportedAt:new Date().toISOString(),extension:'Video Catcher',version:chrome.runtime.getManifest().version,userAgent:navigator.userAgent,activeTab:activeTab?{id:activeTab.id,title:activeTab.title,url:activeTab.url}:null,ui:{currentTaskId,currentTaskStatus,lastTaskUpdateAt,splitDownload:$('splitDownload').checked,choiceCount:choices.length,subtitleCount:subtitles.length,choices:choices.map(c=>({kind:c.kind,label:c.label,height:c.height,bitrate:c.bitrate,splitAvailable:!!splitChoiceFor(c)})),subtitles:subtitles.map(s=>({trackId:s.trackId||subtitleTrackId(s),label:s.label||'',metadataLanguage:s.language||'',detectedLanguage:s.detectedLanguage||'',detectedLanguageLabel:s.detectedLanguageLabel||'',detectedConfidence:s.detectedConfidence||0,metadataMismatch:!!s.metadataMismatch,source:s.source||'',url:(()=>{try{const u=new URL(s.url);return `${u.origin}${u.pathname}`}catch(_){return ''}})()}))},backend:r};
+  const payload={exportedAt:new Date().toISOString(),extension:'Video Catcher',version:chrome.runtime.getManifest().version,userAgent:navigator.userAgent,activeTab:activeTab?{id:activeTab.id,windowId:activeTab.windowId,index:activeTab.index,title:activeTab.title,url:activeTab.url}:null,ui:{contextKey,currentTaskId,currentTaskStatus,lastTaskUpdateAt,splitDownload:$('splitDownload').checked,choiceCount:choices.length,subtitleCount:subtitles.length,choices:choices.map(c=>({kind:c.kind,label:c.label,height:c.height,bitrate:c.bitrate,splitAvailable:!!splitChoiceFor(c)})),subtitles:subtitles.map(s=>({trackId:s.trackId||subtitleTrackId(s),label:s.label||'',metadataLanguage:s.language||'',detectedLanguage:s.detectedLanguage||'',detectedLanguageLabel:s.detectedLanguageLabel||'',detectedConfidence:s.detectedConfidence||0,metadataMismatch:!!s.metadataMismatch,source:s.source||'',url:(()=>{try{const u=new URL(s.url);return `${u.origin}${u.pathname}`}catch(_){return ''}})()}))},backend:r};
   const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`video-catcher-debug-${new Date().toISOString().replace(/[:.]/g,'-')}.json`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);
 }
 
 async function init(){
   $('versionLabel').textContent=`v${chrome.runtime.getManifest().version}`;
-  const r=await chrome.runtime.sendMessage({type:'getActiveTab'});activeTab=r?.tab;if(!activeTab?.id){setStatus('אין כרטיסייה פעילה','פתח את עמוד השיעור ונסה שוב.');return;}$('pageLine').textContent=activeTab.url||'';await scan();
+  const ok=await syncActiveTab();
+  if(ok)await scanCurrentTab();
 }
-$('refresh').onclick=scan;$('scanAgain').onclick=scan;$('download').onclick=doDownload;$('cancelDownload').onclick=cancelDownload;$('downloadSubtitle').onclick=downloadSubtitle;$('downloadDebug').onclick=downloadDebug;$('quality').onchange=updateSplitAvailability;$('splitInfo').onclick=toggleSplitInfo;$('clear').onclick=async()=>{await chrome.runtime.sendMessage({type:'clearStreams',tabId:activeTab.id});allItems=[];choices=[];subtitles=[];render()};init();
+$('refresh').onclick=scan;$('scanAgain').onclick=scan;$('download').onclick=doDownload;$('cancelDownload').onclick=cancelDownload;$('downloadSubtitle').onclick=downloadSubtitle;$('downloadDebug').onclick=downloadDebug;$('quality').onchange=updateSplitAvailability;$('splitInfo').onclick=toggleSplitInfo;$('clear').onclick=async()=>{if(!activeTab?.id)return;await chrome.runtime.sendMessage({type:'clearStreams',tabId:activeTab.id});resetContextUi();renderTabContext(activeTab);setStatus('נוקו הזיהויים','לחץ על סריקה מחדש כדי לחפש שוב בטאב הנוכחי.')};init();
