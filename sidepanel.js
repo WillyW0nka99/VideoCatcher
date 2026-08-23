@@ -205,7 +205,7 @@ chrome.runtime.onMessage.addListener(m=>{
       setProgress(pct,'מוריד',d.totalBytes>0?`${fmtSize(d.bytesReceived)} מתוך ${fmtSize(d.totalBytes)}`:`התקבלו ${fmtSize(d.bytesReceived)}`);
       setCancelVisible(true);
     } else if(d.state==='complete'){
-      currentTaskStatus='done';setProgress(100,'הושלם','הקובץ נשמר במחשב.');$('downloadText').textContent='הושלם';$('download').disabled=false;setCancelVisible(false);currentDirectDownloadId=null;
+      currentTaskStatus='done';setProgress(100,'הושלם','הקובץ נשמר במחשב.');$('downloadText').textContent='הורד שוב';$('download').disabled=false;setCancelVisible(false);currentDirectDownloadId=null;
     } else if(d.state==='interrupted'){
       currentTaskStatus='error';setProgress(0,'ההורדה הופסקה',d.error||'הדפדפן הפסיק את ההורדה.');$('downloadText').textContent='נסה שוב';$('download').disabled=false;setCancelVisible(false);currentDirectDownloadId=null;
     }
@@ -214,7 +214,7 @@ chrome.runtime.onMessage.addListener(m=>{
   if(m.type!=='taskUpdate')return;const t=m.task;if(currentTaskId&&t.id!==currentTaskId)return;currentTaskId=t.id;currentTaskStatus=t.status;lastTaskUpdateAt=Date.now();$('stallHint').classList.add('hidden');
   const labels={starting:'מתחיל',preparing:'מכין',downloading:'מוריד',assembling:'מעבד וידאו',saving:'שומר',done:'הושלם',error:'שגיאה',cancelling:'מבטל',cancelled:'בוטל'};setProgress(t.progress||0,labels[t.status]||t.status,t.detail||'');
   const active=['starting','preparing','downloading','assembling','saving','cancelling'].includes(t.status);setCancelVisible(active);
-  if(t.status==='done'){$('downloadText').textContent='הושלם';$('download').disabled=false;setCancelVisible(false)}
+  if(t.status==='done'){$('downloadText').textContent='הורד שוב';$('download').disabled=false;setCancelVisible(false)}
   if(t.status==='error'){$('downloadText').textContent='נסה שוב';$('download').disabled=false;setCancelVisible(false)}
   if(t.status==='cancelled'){$('downloadText').textContent='הורד וידאו';$('download').disabled=false;setCancelVisible(false);currentTaskId=null}
 });
