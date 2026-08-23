@@ -151,6 +151,12 @@ function scanFrame() {
   };
 
   const clean = (s) => typeof s === 'string' ? s.replace(/&amp;/g, '&').replace(/\\u0026/g, '&').replace(/\\\//g, '/') : s;
+  const isClearlyBrokenSubtitleUrl = (url) => {
+    try {
+      const u = new URL(url);
+      return u.hostname === 'captions.vimeo.com' && /\/captions\/\d+\.(?:vtt|srt)$/i.test(u.pathname) && u.searchParams.has('expires') && !u.searchParams.has('sig');
+    } catch (_) { return false; }
+  };
   const titleFromDoc = () => {
     try { return document.title || ''; } catch (_) { return ''; }
   };
