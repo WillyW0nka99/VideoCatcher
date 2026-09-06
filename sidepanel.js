@@ -33,12 +33,26 @@ function setStatus(title,text){ $('statusTitle').textContent=title; $('statusTex
 function setProgress(p,label,detail){ $('progressBox').classList.remove('hidden'); $('bar').style.width=`${Math.max(0,Math.min(100,p))}%`; $('progressPct').textContent=`${Math.round(p)}%`; $('progressLabel').textContent=label||'מוריד…'; $('progressDetail').textContent=detail||''; }
 function setCancelVisible(show){ $('cancelDownload').classList.toggle('hidden',!show); }
 function splitChoiceFor(choice){ return choice?.kind==='hls' ? choice : (choice?.hlsAlternative || null); }
+function updateSplitEstimate(){
+  const box=$('splitEstimate');
+  if(!box)return;
+  const selected=choices[Number($('quality').value)||0];
+  const source=splitChoiceFor(selected);
+  const enabled=$('splitDownload').checked&&!$('splitDownload').disabled&&!!source;
+  if(!enabled){box.classList.add('hidden');box.textContent='';return;}
+  const bytes=estimateSize(source);
+  if(!(bytes>0)){box.classList.add('hidden');box.textContent='';return;}
+  const parts=Math.max(1,Math.ceil(bytes/MAX_SPLIT_BYTES));
+  box.textContent=parts===1?'הערכה: קובץ אחד':`הערכה: כ־${parts} קבצים`;
+  box.classList.remove('hidden');
+}
 function updateSplitAvailability(){
   const c=choices[Number($('quality').value)||0];
   const supported=!!splitChoiceFor(c);
   $('splitDownload').disabled=!supported;
   $('splitOption').classList.toggle('disabled',!supported);
   if(!supported)$('splitDownload').checked=false;
+  updateSplitEstimate();
 }
 function toggleSplitInfo(){
   const help=$('splitHelp');
@@ -324,4 +338,4 @@ async function init(){
   const ok=await syncActiveTab();
   if(ok)await scanCurrentTab();
 }
-$('refresh').onclick=scan;$('scanAgain').onclick=scan;$('download').onclick=doDownload;$('cancelDownload').onclick=cancelDownload;$('downloadSubtitle').onclick=downloadSubtitle;$('downloadDebug').onclick=downloadDebug;$('quality').onchange=updateSplitAvailability;$('splitInfo').onclick=toggleSplitInfo;$('clear').onclick=async()=>{if(!activeTab?.id)return;await chrome.runtime.sendMessage({type:'clearStreams',tabId:activeTab.id});resetContextUi();renderTabContext(activeTab);setStatus('נוקו הזיהויים','לחץ על סריקה מחדש כדי לחפש שוב בטאב הנוכחי.')};init();
+$('refresh').onclick=scan;$('scanAgain').onclick=scan;$('download').onclick=doDownload;$('cancelDownload').onclick=cancelDownload;$('downloadSubtitle').onclick=downloadSubtitle;$('downloadDebug').onclick=downloadDebug;$('quality').onchange=updateSplitAvailability;$('splitDownload').onchange=updateSplitEstimate;$('splitInfo').onclick=toggleSplitInfo;$('clear').onclick=async()=>{if(!activeTab?.id)return;await chrome.runtime.sendMessage({type:'clearStreams',tabId:activeTab.id});resetContextUi();renderTabContext(activeTab);setStatus('נוקו הזיהויים','לחץ על סריקה מחדש כדי לחפש שוב בטאב הנוכחי.')};init();

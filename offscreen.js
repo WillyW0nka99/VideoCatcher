@@ -365,6 +365,10 @@ function sanitizeFilename(name, ext) {
   const base = String(name || 'Video').replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 170) || 'Video';
   return `${base}.${ext}`;
 }
+function sanitizeFolderComponent(name) {
+  const base=String(name||'וידאו').replace(/[<>:"/\\|?*\x00-\x1F]/g,'_').replace(/\s+/g,' ').trim().replace(/[. ]+$/g,'').slice(0,100);
+  return base||'וידאו';
+}
 async function progress(taskId, status, progressValue, detail, bytes = 0) {
   await chrome.runtime.sendMessage({ type: 'offscreenProgress', taskId, status, progress: Math.max(0, Math.min(100, progressValue)), detail, bytes });
 }
@@ -459,12 +463,14 @@ async function downloadHls(m) {
     const totalOutputBytes=outputs.reduce((n,x)=>n+x.length,0);
     await debug('info', 'hls.assemble.ok', { taskId, bytes: totalOutputBytes, ext, split, partCount: totalParts, partBytes: outputs.map(x=>x.length) });
 
+    const splitFolder=split?`Video Catcher/${sanitizeFolderComponent(title||'וידאו')}`:'';
     for(let i=0;i<outputs.length;i++){
       if(job.cancelled)throw new Error('ההורדה בוטלה.');
       const out=outputs[i];
       const num=String(i+1).padStart(2,'0'), total=String(totalParts).padStart(2,'0');
       const suffix=split&&totalParts>1?` - part-${num}-of-${total}`:'';
-      const filename=sanitizeFilename(`${title || 'וידאו'}${quality ? ` - ${quality}` : ''}${suffix}`,ext);
+      const baseFilename=sanitizeFilename(`${title || 'וידאו'}${quality ? ` - ${quality}` : ''}${suffix}`,ext);
+      const filename=split?`${splitFolder}/${baseFilename}`:baseFilename;
       const savePct=96+Math.round(3*((i+1)/Math.max(1,totalParts)));
       await progress(taskId,'assembling',savePct,split?`יוצר חלק ${i+1} מתוך ${totalParts}…`:`יוצר קובץ ${quality || ''}…`,out.length);
       const blob=new Blob([out],{type:ext==='mp4'?'video/mp4':'video/mp2t'});
