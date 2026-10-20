@@ -6,6 +6,9 @@ const MAX_DEBUG = 500;
 let offscreenCreating = null;
 
 const now = () => Date.now();
+function normalizeTaskPageUrl(url) {
+  try { const u = new URL(String(url || '')); u.hash = ''; return u.href; } catch (_) { return String(url || ''); }
+}
 
 function redactString(value) {
   const s = String(value ?? '');
@@ -317,6 +320,7 @@ async function analyzeHls(url) {
 }
 
 async function startHlsDownload(payload) {
+  const taskId = String(payload.taskId || crypto.randomUUID());
   const job = {
     variantUrl: payload.variantUrl || '',
     audioUrl: payload.audioUrl || '',
@@ -324,74 +328,95 @@ async function startHlsDownload(payload) {
     quality: payload.quality || '',
     split: !!payload.split,
     maxPartBytes: Math.max(0, Number(payload.maxPartBytes || 0)),
+    timeLimited: !!payload.timeLimited,
+    rangeStartSec: Math.max(0, Number(payload.rangeStartSec || 0)),
+    rangeEndSec: Math.max(0, Number(payload.rangeEndSec || 0)),
     tabId: Number.isInteger(payload.tabId) ? payload.tabId : null,
     pageUrl: payload.pageUrl || ''
   };
-  await debugLog('info', 'hls.download.request', job);
-  await ensureOffscreen();
-  const taskId = crypto.randomUUID();
+  await debugLog('info', 'hls.download.request', { taskId, ...job });
   await setTask(taskId, {
-    id: taskId,
-    status: 'starting',
-    progress: 0,
-    title: job.title,
-    quality: job.quality,
-    split: job.split,
-    maxPartBytes: job.maxPartBytes,
-    tabId: job.tabId,
-    pageUrl: job.pageUrl,
-    downloadIds: [],
-    startedAt: now()
+    id: taskId, kind: 'hls', status: 'starting', progress: 0,
+    title: job.title, quality: job.quality, split: job.split, maxPartBytes: job.maxPartBytes,
+    timeLimited: job.timeLimited, rangeStartSec: job.rangeStartSec, rangeEndSec: job.rangeEndSec,
+    tabId: job.tabId, pageUrl: job.pageUrl, downloadIds: [], startedAt: now(), cancelRequested: false
   });
 
-  let ack;
   try {
-    ack = await Promise.race([
+    await ensureOffscreen();
+    const beforeDispatch = (await getTasks())[taskId];
+    if (!beforeDispatch || beforeDispatch.cancelRequested || ['cancelled','cancelling'].includes(beforeDispatch.status)) {
+      return { ok: false, cancelled: true, taskId, error: 'ההורדה בוטלה.' };
+    }
+    const ack = await Promise.race([
       chrome.runtime.sendMessage({ ...job, taskId, target: 'offscreen', type: 'downloadHls' }),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Download worker did not acknowledge the job within 5 seconds.')), 5000))
     ]);
+    if (!ack?.ok) {
+      const error = ack?.error || 'Download worker rejected the job.';
+      const current=(await getTasks())[taskId];
+      if(current?.cancelRequested||['cancelled','cancelling'].includes(current?.status))return {ok:false,cancelled:true,taskId,error:'ההורדה בוטלה.'};
+      await debugLog('error', 'hls.download.dispatch.rejected', { taskId, ack });
+      await setTask(taskId, { status: 'error', progress: 0, detail: error });
+      return { ok: false, taskId, error };
+    }
+    await debugLog('info', 'hls.download.dispatch.ok', { taskId });
+    return { ok: true, taskId };
   } catch (e) {
+    const current=(await getTasks())[taskId];
+    if(current?.cancelRequested||['cancelled','cancelling'].includes(current?.status))return {ok:false,cancelled:true,taskId,error:'ההורדה בוטלה.'};
     const error = String(e?.message || e);
     await debugLog('error', 'hls.download.dispatch.failed', { taskId, error });
     await setTask(taskId, { status: 'error', progress: 0, detail: error });
     return { ok: false, taskId, error };
   }
-
-  if (!ack?.ok) {
-    const error = ack?.error || 'Download worker rejected the job.';
-    await debugLog('error', 'hls.download.dispatch.rejected', { taskId, ack });
-    await setTask(taskId, { status: 'error', progress: 0, detail: error });
-    return { ok: false, taskId, error };
-  }
-
-  await debugLog('info', 'hls.download.dispatch.ok', { taskId });
-  return { ok: true, taskId };
 }
 
 async function cancelTask(taskId) {
   const tasks = await getTasks();
   const task = tasks[taskId];
   if (!task) return { ok: false, error: 'Download task not found.' };
+  if (['done','error','cancelled'].includes(task.status)) return { ok: true, alreadyStopped: true };
   await debugLog('info', 'task.cancel.request', { taskId, status: task.status, downloadId: task.downloadId || null, downloadIds: task.downloadIds || [] });
   await setTask(taskId, { status: 'cancelling', detail: 'מבטל הורדה…', cancelRequested: true });
 
-  try {
-    await ensureOffscreen();
-    await Promise.race([
-      chrome.runtime.sendMessage({ target: 'offscreen', type: 'cancelHls', taskId }),
-      new Promise(resolve => setTimeout(() => resolve({ ok: false, timeout: true }), 2500))
-    ]);
-  } catch (_) {}
+  if (task.kind !== 'direct') {
+    try {
+      await ensureOffscreen();
+      await Promise.race([
+        chrome.runtime.sendMessage({ target: 'offscreen', type: 'cancelHls', taskId }),
+        new Promise(resolve => setTimeout(() => resolve({ ok: false, timeout: true }), 2500))
+      ]);
+    } catch (_) {}
+  }
 
-  const ids = [...new Set([...(Array.isArray(task.downloadIds) ? task.downloadIds : []), task.downloadId].filter(Number.isInteger))];
+  const latestTask = (await getTasks())[taskId] || task;
+  const ids = [...new Set([...(Array.isArray(latestTask.downloadIds) ? latestTask.downloadIds : []), latestTask.downloadId].filter(Number.isInteger))];
   for (const id of ids) {
     try { await chrome.downloads.cancel(id); } catch (_) {}
     try { await chrome.downloads.removeFile(id); } catch (_) {}
     try { await chrome.downloads.erase({ id }); } catch (_) {}
   }
-  await setTask(taskId, { status: 'cancelled', progress: task.progress || 0, detail: 'ההורדה בוטלה', cancelRequested: true });
-  await debugLog('info', 'task.cancel.done', { taskId });
+  await setTask(taskId, { status: 'cancelled', progress: latestTask.progress || 0, detail: 'ההורדה בוטלה', cancelRequested: true });
+  await debugLog('info', 'task.cancel.done', { taskId, cancelledDownloadIds: ids });
   return { ok: true };
+}
+
+async function cancelTasksForContext(tabId, pageUrl, preferredTaskId = '') {
+  const tasks = await getTasks();
+  const activeStatuses = new Set(['starting','preparing','downloading','assembling','saving','cancelling']);
+  const wantedUrl = normalizeTaskPageUrl(pageUrl || '');
+  const ids = [];
+  if (preferredTaskId && tasks[preferredTaskId] && activeStatuses.has(tasks[preferredTaskId].status)) ids.push(preferredTaskId);
+  for (const [id, task] of Object.entries(tasks)) {
+    if (!activeStatuses.has(task?.status)) continue;
+    if (Number.isInteger(tabId) && Number(task?.tabId) !== tabId) continue;
+    if (wantedUrl && normalizeTaskPageUrl(task?.pageUrl || '') !== wantedUrl) continue;
+    ids.push(id);
+  }
+  const unique = [...new Set(ids)];
+  for (const id of unique) await cancelTask(id);
+  return { ok: true, count: unique.length };
 }
 
 async function cancelDirectDownload(downloadId) {
@@ -415,13 +440,27 @@ chrome.downloads.onChanged.addListener(async delta => {
     const items = await chrome.downloads.search({ id: delta.id });
     const item = items[0];
     if (!item) return;
+    const tasks = await getTasks();
+    for (const [taskId, task] of Object.entries(tasks)) {
+      const ids = [...(Array.isArray(task?.downloadIds) ? task.downloadIds : []), task?.downloadId].filter(Number.isInteger);
+      if (!ids.includes(item.id)) continue;
+      if (task.cancelRequested || ['cancelled','cancelling'].includes(task.status)) {
+        try { await chrome.downloads.cancel(item.id); } catch (_) {}
+        continue;
+      }
+      if (task.kind === 'direct') {
+        const pct = item.totalBytes > 0 ? Math.max(1, Math.min(99, 100 * (item.bytesReceived || 0) / item.totalBytes)) : (task.progress || 10);
+        if (item.state === 'in_progress') await setTask(taskId, { status: 'downloading', progress: pct, detail: item.totalBytes > 0 ? `${Math.round((item.bytesReceived||0)/1e6)} MB מתוך ${Math.round(item.totalBytes/1e6)} MB` : 'מוריד דרך Chrome' });
+        else if (item.state === 'complete') await setTask(taskId, { status: 'done', progress: 100, detail: 'הקובץ נשמר במחשב.' });
+        else if (item.state === 'interrupted') await setTask(taskId, { status: 'error', progress: task.progress || 0, detail: item.error || 'ההורדה הופסקה.' });
+      }
+    }
     chrome.runtime.sendMessage({
       target: 'ui', type: 'directDownloadUpdate',
       download: { id: item.id, state: item.state, bytesReceived: item.bytesReceived || 0, totalBytes: item.totalBytes || 0, error: item.error || '' }
     }).catch(()=>{});
   } catch (_) {}
 });
-
 chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
   notifyTabContextChanged({ reason: 'activated', tabId, windowId });
 });
@@ -464,10 +503,20 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
       sendResponse({ ok: true }); return;
     }
     if (m?.type === 'downloadDirect') {
-      await debugLog('info', 'direct.download.request', { url: m.url, filename: m.filename });
+      const taskId = String(m.taskId || crypto.randomUUID());
+      await debugLog('info', 'direct.download.request', { taskId, url: m.url, filename: m.filename, tabId: m.tabId ?? null, pageUrl: m.pageUrl || '' });
+      await setTask(taskId, { id: taskId, kind: 'direct', status: 'starting', progress: 0, title: m.filename || 'וידאו', tabId: Number.isInteger(m.tabId) ? m.tabId : null, pageUrl: m.pageUrl || '', downloadIds: [], startedAt: now(), cancelRequested: false });
+      let current=(await getTasks())[taskId];
+      if(current?.cancelRequested||['cancelled','cancelling'].includes(current?.status)){sendResponse({ok:false,cancelled:true,taskId,error:'ההורדה בוטלה.'});return;}
       const safe = String(m.filename || 'וידאו.mp4').replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').slice(0, 180);
       const id = await chrome.downloads.download({ url: m.url, filename: safe.endsWith('.mp4') ? safe : `${safe}.mp4`, conflictAction: 'uniquify', saveAs: false });
-      sendResponse({ ok: true, downloadId: id }); return;
+      current=(await getTasks())[taskId];
+      if(current?.cancelRequested||['cancelled','cancelling'].includes(current?.status)){
+        try{await chrome.downloads.cancel(id)}catch(_){} try{await chrome.downloads.removeFile(id)}catch(_){} try{await chrome.downloads.erase({id})}catch(_){}
+        sendResponse({ok:false,cancelled:true,taskId,error:'ההורדה בוטלה.'});return;
+      }
+      await setTask(taskId, { status: 'downloading', progress: 10, downloadId: id, downloadIds: [id], detail: 'מוריד דרך Chrome' });
+      sendResponse({ ok: true, downloadId: id, taskId }); return;
     }
     if (m?.type === 'analyzeHls') {
       sendResponse(await analyzeHls(m.url)); return;
@@ -485,6 +534,9 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
     if (m?.type === 'cancelDirectDownload') {
       sendResponse(await cancelDirectDownload(Number(m.downloadId))); return;
     }
+    if (m?.type === 'cancelContextDownloads') {
+      sendResponse(await cancelTasksForContext(Number(m.tabId), m.pageUrl || '', String(m.preferredTaskId || ''))); return;
+    }
     if (m?.type === 'downloadSubtitle') {
       await ensureOffscreen();
       sendResponse(await chrome.runtime.sendMessage({ target: 'offscreen', type: 'downloadSubtitle', url: m.url, title: m.title || 'וידאו', label: m.label || '', language: m.language || '' })); return;
@@ -493,13 +545,29 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
       sendResponse({ ok: true, tasks: await getTasks() }); return;
     }
     if (m?.type === 'offscreenProgress') {
+      const tasks = await getTasks();
+      const task = tasks[m.taskId];
+      if (!task || task.cancelRequested || ['cancelled','cancelling'].includes(task.status)) {
+        sendResponse({ ok: true, ignored: 'cancelled' }); return;
+      }
       await setTask(m.taskId, { status: m.status, progress: m.progress, detail: m.detail || '', bytes: m.bytes || 0 });
       sendResponse({ ok: true }); return;
     }
     if (m?.type === 'offscreenReady') {
+      let tasks = await getTasks();
+      let current = tasks[m.taskId];
+      if (!current || current.cancelRequested || ['cancelled','cancelling'].includes(current.status)) {
+        sendResponse({ ok: false, cancelled: true, error: 'ההורדה בוטלה.' }); return;
+      }
       const downloadId = await chrome.downloads.download({ url: m.blobUrl, filename: m.filename, conflictAction: 'uniquify', saveAs: false });
-      const tasks = await getTasks();
-      const current = tasks[m.taskId] || {};
+      tasks = await getTasks();
+      current = tasks[m.taskId] || {};
+      if (current.cancelRequested || ['cancelled','cancelling'].includes(current.status)) {
+        try { await chrome.downloads.cancel(downloadId); } catch (_) {}
+        try { await chrome.downloads.removeFile(downloadId); } catch (_) {}
+        try { await chrome.downloads.erase({ id: downloadId }); } catch (_) {}
+        sendResponse({ ok: false, cancelled: true, error: 'ההורדה בוטלה.' }); return;
+      }
       const downloadIds = [...new Set([...(Array.isArray(current.downloadIds) ? current.downloadIds : []), downloadId])];
       const saveProgress = Number.isFinite(Number(m.progress)) ? Math.max(0, Math.min(100, Number(m.progress))) : 100;
       await setTask(m.taskId, { status: 'saving', progress: saveProgress, downloadId, downloadIds, detail: m.detail || 'Chrome שומר את הקובץ' });
