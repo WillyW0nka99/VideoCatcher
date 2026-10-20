@@ -149,6 +149,27 @@ function parseMedia(text, baseUrl) {
   return { init, segments };
 }
 
+function selectSegmentIndicesByTime(segments, startSec, endSec) {
+  const start=Math.max(0,Number(startSec)||0);
+  const end=Math.max(0,Number(endSec)||0);
+  const indices=[];
+  let cursor=0, selectedDuration=0, actualStart=null, actualEnd=0, durationKnown=false;
+  for(let i=0;i<segments.length;i++){
+    const dur=Math.max(0,Number(segments[i]?.duration||0));
+    if(dur>0)durationKnown=true;
+    const segStart=cursor, segEnd=cursor+dur;
+    if(segEnd>start && segStart<end){
+      indices.push(i);
+      selectedDuration+=dur;
+      if(actualStart==null)actualStart=segStart;
+      actualEnd=segEnd;
+    }
+    cursor=segEnd;
+  }
+  if(!durationKnown)throw new Error('לא ניתן להגביל זמן בזרם הזה כי רשימת המדיה אינה כוללת משכי מקטעים.');
+  if(!indices.length)throw new Error('לא נמצאו מקטעי וידאו בטווח הזמן שנבחר.');
+  return {indices,selectedDuration,actualStart:actualStart||0,actualEnd};
+}
 function u32(a, o) { return ((a[o] << 24) | (a[o+1] << 16) | (a[o+2] << 8) | a[o+3]) >>> 0; }
 function w32(a, o, v) { a[o] = (v >>> 24) & 255; a[o+1] = (v >>> 16) & 255; a[o+2] = (v >>> 8) & 255; a[o+3] = v & 255; }
 function typeAt(a, o) { return String.fromCharCode(a[o], a[o+1], a[o+2], a[o+3]); }
@@ -349,6 +370,7 @@ async function parallelDownload(items, onProgress, concurrency = 3, phase = 'med
           onProgress(done, items.length, bytes);
           lastErr = null; break;
         } catch (e) {
+          if (activeJobs.get(taskId)?.cancelled || String(e?.message || e).includes('ההורדה בוטלה')) throw e;
           lastErr = e;
           await debug('warn', 'segment.retry', { phase, index: i + 1, total: items.length, attempt, maxAttempts: RETRIES, url: items[i].url, range: items[i].range || null, error: e.message });
           if (attempt < RETRIES) await sleep(600 * (2 ** (attempt - 1)));
@@ -390,11 +412,15 @@ async function analyzeHls(url) {
 async function downloadHls(m) {
   const { taskId, variantUrl, audioUrl, title, quality } = m;
   const split=!!m.split;
+  const timeLimited=!!m.timeLimited;
+  const rangeStartSec=Math.max(0,Number(m.rangeStartSec)||0);
+  const rangeEndSec=Math.max(0,Number(m.rangeEndSec)||0);
   const maxPartBytes=split?Math.max(1000000,Number(m.maxPartBytes)||DEFAULT_SPLIT_BYTES):0;
   const job = { cancelled: false, controllers: new Set(), blobUrls: new Set() };
   activeJobs.set(taskId, job);
   try {
-    await debug('info', 'hls.download.start', { taskId, variantUrl, audioUrl, quality, split, maxPartBytes });
+    if(timeLimited&&!(rangeEndSec>rangeStartSec))throw new Error('טווח הזמן שנבחר אינו תקין.');
+    await debug('info', 'hls.download.start', { taskId, variantUrl, audioUrl, quality, split, maxPartBytes, timeLimited, rangeStartSec, rangeEndSec });
     await progress(taskId, 'preparing', 2, 'פותח את רשימות המדיה…');
 
     const [videoText, audioText] = await Promise.all([
@@ -405,7 +431,15 @@ async function downloadHls(m) {
     if (!video.segments.length) throw new Error('לא נמצאו מקטעי וידאו.');
     let audio = audioText ? parseMedia(audioText, audioUrl) : null;
     if (audio && !audio.segments.length) audio = null;
-    await debug('info', 'hls.media.parsed', { taskId, videoSegments: video.segments.length, audioSegments: audio?.segments.length || 0, videoInit: !!video.init, audioInit: !!audio?.init });
+    let selectedRangeDuration=0;
+    if(timeLimited){
+      const selection=selectSegmentIndicesByTime(video.segments,rangeStartSec,rangeEndSec);
+      video.segments=selection.indices.map(i=>video.segments[i]).filter(Boolean);
+      if(audio)audio.segments=selection.indices.map(i=>audio.segments[i]).filter(Boolean);
+      selectedRangeDuration=selection.selectedDuration;
+      await debug('info','hls.range.selected',{taskId,requestedStart:rangeStartSec,requestedEnd:rangeEndSec,actualStart:selection.actualStart,actualEnd:selection.actualEnd,selectedSegments:video.segments.length,selectedDuration:selectedRangeDuration});
+    }
+    await debug('info', 'hls.media.parsed', { taskId, videoSegments: video.segments.length, audioSegments: audio?.segments.length || 0, videoInit: !!video.init, audioInit: !!audio?.init, timeLimited, selectedRangeDuration });
 
     const totalSegs = video.segments.length + (audio?.segments.length || 0) + (video.init ? 1 : 0) + (audio?.init ? 1 : 0);
     await progress(taskId, 'preparing', 5, `נמצאו ${totalSegs} חלקי מדיה`);
@@ -450,7 +484,7 @@ async function downloadHls(m) {
         });
       }else{
         const indices=Array.from({length:Math.max(vd.chunks.length,ad?.chunks.length||0)},(_,i)=>i);
-        outputs=[buildMp4Part(init,vd.chunks,ad?.chunks||null,indices)];
+        outputs=[buildMp4Part(init,vd.chunks,ad?.chunks||null,indices,timeLimited?selectedRangeDuration:0)];
       }
     } else {
       if (audio) throw new Error('מבנה הזרם הזה אינו נתמך למיזוג ישיר בדפדפן.');
