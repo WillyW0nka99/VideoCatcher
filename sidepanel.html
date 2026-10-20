@@ -52,6 +52,23 @@
           <select id="quality"></select>
         </div>
 
+        <div id="timeLimitOption" class="timeLimitOption">
+          <label class="timeToggle" for="limitTime">
+            <input type="checkbox" id="limitTime">
+            <span class="toggleTrack" aria-hidden="true"><span class="toggleKnob"></span></span>
+            <span class="splitLabel">הגבלת זמן</span>
+          </label>
+          <div id="timeFields" class="timeFields hidden">
+            <label>התחלה
+              <input id="timeStart" class="timeInput" type="text" inputmode="numeric" placeholder="00:00" autocomplete="off">
+            </label>
+            <span class="timeDash">–</span>
+            <label>סיום
+              <input id="timeEnd" class="timeInput" type="text" inputmode="numeric" placeholder="00:00" autocomplete="off">
+            </label>
+          </div>
+          <div id="timeHint" class="timeHint hidden">החיתוך מתבצע בגבולות מקטעי הווידאו, ולכן ייתכן פער של מספר שניות.</div>
+        </div>
         <div id="splitOption" class="splitOption">
           <label class="splitToggle" for="splitDownload">
             <input type="checkbox" id="splitDownload">
