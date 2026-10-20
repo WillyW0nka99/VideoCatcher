@@ -139,6 +139,13 @@ function resetContextUi(){
   $('videoCard').classList.add('hidden');
   $('empty').classList.add('hidden');
   $('subtitleSection').classList.add('hidden');
+  if($('limitTime')){
+    $('limitTime').checked=false;
+    $('timeStart').value='';
+    $('timeEnd').value='';
+    $('timeFields').classList.add('hidden');
+    $('timeHint').classList.add('hidden');
+  }
   $('tech').textContent='';
 }
 
