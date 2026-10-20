@@ -335,6 +335,10 @@ async function startHlsDownload(payload) {
     pageUrl: payload.pageUrl || ''
   };
   await debugLog('info', 'hls.download.request', { taskId, ...job });
+  const preExisting = (await getTasks())[taskId];
+  if (preExisting?.cancelRequested || ['cancelled','cancelling'].includes(preExisting?.status)) {
+    return { ok: false, cancelled: true, taskId, error: 'ההורדה בוטלה.' };
+  }
   await setTask(taskId, {
     id: taskId, kind: 'hls', status: 'starting', progress: 0,
     title: job.title, quality: job.quality, split: job.split, maxPartBytes: job.maxPartBytes,
@@ -415,8 +419,15 @@ async function cancelTasksForContext(tabId, pageUrl, preferredTaskId = '') {
     ids.push(id);
   }
   const unique = [...new Set(ids)];
-  for (const id of unique) await cancelTask(id);
-  return { ok: true, count: unique.length };
+  if (preferredTaskId && !tasks[preferredTaskId]) {
+    await setTask(preferredTaskId, { id: preferredTaskId, status: 'cancelled', progress: 0, detail: 'ההורדה בוטלה', cancelRequested: true, tabId: Number.isInteger(tabId) ? tabId : null, pageUrl: pageUrl || '', startedAt: now() });
+    unique.push(preferredTaskId);
+  }
+  for (const id of [...new Set(unique)]) {
+    const current=(await getTasks())[id];
+    if(current && current.status !== 'cancelled') await cancelTask(id);
+  }
+  return { ok: true, count: [...new Set(unique)].length };
 }
 
 async function cancelDirectDownload(downloadId) {
@@ -505,6 +516,8 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
     if (m?.type === 'downloadDirect') {
       const taskId = String(m.taskId || crypto.randomUUID());
       await debugLog('info', 'direct.download.request', { taskId, url: m.url, filename: m.filename, tabId: m.tabId ?? null, pageUrl: m.pageUrl || '' });
+      const preExisting=(await getTasks())[taskId];
+      if(preExisting?.cancelRequested||['cancelled','cancelling'].includes(preExisting?.status)){sendResponse({ok:false,cancelled:true,taskId,error:'ההורדה בוטלה.'});return;}
       await setTask(taskId, { id: taskId, kind: 'direct', status: 'starting', progress: 0, title: m.filename || 'וידאו', tabId: Number.isInteger(m.tabId) ? m.tabId : null, pageUrl: m.pageUrl || '', downloadIds: [], startedAt: now(), cancelRequested: false });
       let current=(await getTasks())[taskId];
       if(current?.cancelRequested||['cancelled','cancelling'].includes(current?.status)){sendResponse({ok:false,cancelled:true,taskId,error:'ההורדה בוטלה.'});return;}
