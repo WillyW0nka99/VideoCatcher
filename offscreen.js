@@ -435,9 +435,13 @@ async function downloadHls(m) {
     if(timeLimited){
       const selection=selectSegmentIndicesByTime(video.segments,rangeStartSec,rangeEndSec);
       video.segments=selection.indices.map(i=>video.segments[i]).filter(Boolean);
-      if(audio)audio.segments=selection.indices.map(i=>audio.segments[i]).filter(Boolean);
+      let audioSelection=null;
+      if(audio){
+        audioSelection=selectSegmentIndicesByTime(audio.segments,rangeStartSec,rangeEndSec);
+        audio.segments=audioSelection.indices.map(i=>audio.segments[i]).filter(Boolean);
+      }
       selectedRangeDuration=selection.selectedDuration;
-      await debug('info','hls.range.selected',{taskId,requestedStart:rangeStartSec,requestedEnd:rangeEndSec,actualStart:selection.actualStart,actualEnd:selection.actualEnd,selectedSegments:video.segments.length,selectedDuration:selectedRangeDuration});
+      await debug('info','hls.range.selected',{taskId,requestedStart:rangeStartSec,requestedEnd:rangeEndSec,actualStart:selection.actualStart,actualEnd:selection.actualEnd,selectedVideoSegments:video.segments.length,selectedAudioSegments:audio?.segments.length||0,selectedDuration:selectedRangeDuration,audioActualStart:audioSelection?.actualStart??null,audioActualEnd:audioSelection?.actualEnd??null});
     }
     await debug('info', 'hls.media.parsed', { taskId, videoSegments: video.segments.length, audioSegments: audio?.segments.length || 0, videoInit: !!video.init, audioInit: !!audio?.init, timeLimited, selectedRangeDuration });
 
