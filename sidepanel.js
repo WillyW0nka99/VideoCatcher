@@ -33,6 +33,53 @@ function setStatus(title,text){ $('statusTitle').textContent=title; $('statusTex
 function setProgress(p,label,detail){ $('progressBox').classList.remove('hidden'); $('bar').style.width=`${Math.max(0,Math.min(100,p))}%`; $('progressPct').textContent=`${Math.round(p)}%`; $('progressLabel').textContent=label||'מוריד…'; $('progressDetail').textContent=detail||''; }
 function setCancelVisible(show){ $('cancelDownload').classList.toggle('hidden',!show); }
 function splitChoiceFor(choice){ return choice?.kind==='hls' ? choice : (choice?.hlsAlternative || null); }
+function parseTimeValue(value){
+  const raw=String(value||'').trim();
+  if(!raw)return NaN;
+  const parts=raw.split(':').map(x=>Number(x));
+  if(parts.some(x=>!Number.isFinite(x)||x<0))return NaN;
+  if(parts.length===1)return parts[0];
+  if(parts.length===2){if(parts[1]>=60)return NaN;return parts[0]*60+parts[1];}
+  if(parts.length===3){if(parts[1]>=60||parts[2]>=60)return NaN;return parts[0]*3600+parts[1]*60+parts[2];}
+  return NaN;
+}
+function formatTimeField(sec){
+  sec=Math.max(0,Math.floor(Number(sec)||0));
+  const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),ss=sec%60;
+  return h?`${h}:${String(m).padStart(2,'0')}:${String(ss).padStart(2,'0')}`:`${m}:${String(ss).padStart(2,'0')}`;
+}
+function requestedTimeRange(showError=true){
+  if(!$('limitTime')?.checked)return null;
+  const start=parseTimeValue($('timeStart').value);
+  const end=parseTimeValue($('timeEnd').value);
+  const selected=choices[Number($('quality').value)||0];
+  const duration=Number(selected?.item?.duration||0);
+  if(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end<=start){
+    if(showError)setStatus('טווח זמן לא תקין','הזן התחלה וסיום בפורמט 00:00 או 00:00:00, כאשר זמן הסיום גדול מזמן ההתחלה.');
+    return null;
+  }
+  if(duration>0&&start>=duration){
+    if(showError)setStatus('טווח זמן לא תקין','זמן ההתחלה נמצא אחרי סוף הסרטון.');
+    return null;
+  }
+  return {start,end:duration>0?Math.min(end,duration):end};
+}
+function updateTimeAvailability(){
+  const selected=choices[Number($('quality').value)||0];
+  const supported=!!splitChoiceFor(selected);
+  $('limitTime').disabled=!supported;
+  $('timeLimitOption').classList.toggle('disabled',!supported);
+  if(!supported)$('limitTime').checked=false;
+  const enabled=$('limitTime').checked&&supported;
+  $('timeFields').classList.toggle('hidden',!enabled);
+  $('timeHint').classList.toggle('hidden',!enabled);
+  if(enabled){
+    if(!$('timeStart').value)$('timeStart').value='00:00';
+    const duration=Number(selected?.item?.duration||0);
+    if(!$('timeEnd').value&&duration>0)$('timeEnd').value=formatTimeField(duration);
+  }
+  updateSplitEstimate();
+}
 function updateSplitEstimate(){
   const box=$('splitEstimate');
   if(!box)return;
@@ -40,7 +87,13 @@ function updateSplitEstimate(){
   const source=splitChoiceFor(selected);
   const enabled=$('splitDownload').checked&&!$('splitDownload').disabled&&!!source;
   if(!enabled){box.classList.add('hidden');box.textContent='';return;}
-  const bytes=estimateSize(source);
+  const fullDuration=Number(source?.item?.duration||selected?.item?.duration||0);
+  const bitrate=Number(source?.bitrate||selected?.bitrate||0);
+  let bytes=fullDuration&&bitrate?fullDuration*bitrate/8:estimateSize(source);
+  if($('limitTime')?.checked&&bytes>0&&fullDuration>0){
+    const range=requestedTimeRange(false);
+    if(range){const selectedDuration=Math.max(0,Math.min(fullDuration,range.end)-Math.min(fullDuration,range.start));bytes*=selectedDuration/fullDuration;}
+  }
   if(!(bytes>0)){box.classList.add('hidden');box.textContent='';return;}
   const parts=Math.max(1,Math.ceil(bytes/MAX_SPLIT_BYTES));
   box.textContent=parts===1?'הערכה: קובץ אחד':`הערכה: כ־${parts} קבצים`;
@@ -52,7 +105,7 @@ function updateSplitAvailability(){
   $('splitDownload').disabled=!supported;
   $('splitOption').classList.toggle('disabled',!supported);
   if(!supported)$('splitDownload').checked=false;
-  updateSplitEstimate();
+  updateTimeAvailability();
 }
 function toggleSplitInfo(){
   const help=$('splitHelp');
@@ -255,29 +308,41 @@ function render(){
 async function doDownload(){
   const selected=choices[Number($('quality').value)||0];if(!selected)return;
   const splitRequested=$('splitDownload').checked;
-  const c=splitRequested?splitChoiceFor(selected):selected;
-  if(splitRequested&&!c){setProgress(0,'לא ניתן לפצל','הורדה מפוצלת זמינה רק כאשר קיים מקור HLS מתאים לאיכות שנבחרה.');return;}
-  $('download').disabled=true;$('stallHint').classList.add('hidden');$('downloadText').textContent='מתחיל…';lastTaskUpdateAt=Date.now();currentTaskStatus='starting';currentTaskId=null;currentDirectDownloadId=null;setCancelVisible(true);
+  const timeLimited=!!$('limitTime')?.checked;
+  const range=timeLimited?requestedTimeRange(true):null;
+  if(timeLimited&&!range)return;
+  const c=(splitRequested||timeLimited)?splitChoiceFor(selected):selected;
+  if((splitRequested||timeLimited)&&!c){setProgress(0,'האפשרות אינה זמינה','הורדה מפוצלת והגבלת זמן דורשות מקור HLS מתאים לאיכות שנבחרה.');return;}
+  $('download').disabled=true;$('stallHint').classList.add('hidden');$('downloadText').textContent='מתחיל…';lastTaskUpdateAt=Date.now();currentTaskStatus='starting';currentDirectDownloadId=null;setCancelVisible(true);
   try{
+    const taskId=crypto.randomUUID();
+    currentTaskId=taskId;
     if(c.kind==='direct'){
       setProgress(8,'מתחיל הורדה','מעביר את הקובץ למנהל ההורדות…');
-      const r=await chrome.runtime.sendMessage({type:'downloadDirect',url:c.item.url,filename:`${titleFor(c.item)} - ${c.label}.mp4`});
+      const r=await chrome.runtime.sendMessage({type:'downloadDirect',taskId,url:c.item.url,filename:`${titleFor(c.item)} - ${c.label}.mp4`,tabId:activeTab?.id,pageUrl:activeTab?.url||''});
       if(!r?.ok)throw new Error(r?.error||'ההורדה לא התחילה');
-      currentDirectDownloadId=r.downloadId; currentTaskStatus='downloading'; setProgress(10,'מוריד','ההורדה מתבצעת דרך מנהל ההורדות של הדפדפן.'); $('downloadText').textContent='מוריד…';
+      currentDirectDownloadId=r.downloadId; currentTaskId=r.taskId||taskId; currentTaskStatus='downloading'; setProgress(10,'מוריד','ההורדה מתבצעת דרך מנהל ההורדות של הדפדפן.'); $('downloadText').textContent='מוריד…';
     }else{
-      setProgress(1,'מתחיל',splitRequested?'מכין הורדה מפוצלת…':'פותח את רשימות המדיה…');
-      const v=c.variant;const r=await chrome.runtime.sendMessage({type:'startHlsDownload',variantUrl:v.url,audioUrl:v.audio?.url||'',title:titleFor(c.item),quality:selected.label||c.label,split:splitRequested,maxPartBytes:splitRequested?MAX_SPLIT_BYTES:0,tabId:activeTab?.id,pageUrl:activeTab?.url||''});
+      const prepDetail=splitRequested&&timeLimited?'מכין טווח זמן והורדה מפוצלת…':(splitRequested?'מכין הורדה מפוצלת…':(timeLimited?'מכין את טווח הזמן…':'פותח את רשימות המדיה…'));
+      setProgress(1,'מתחיל',prepDetail);
+      const v=c.variant;
+      const r=await chrome.runtime.sendMessage({type:'startHlsDownload',taskId,variantUrl:v.url,audioUrl:v.audio?.url||'',title:titleFor(c.item),quality:selected.label||c.label,split:splitRequested,maxPartBytes:splitRequested?MAX_SPLIT_BYTES:0,timeLimited,rangeStartSec:range?.start||0,rangeEndSec:range?.end||0,tabId:activeTab?.id,pageUrl:activeTab?.url||''});
       if(!r?.ok)throw new Error(r?.error||'לא ניתן להתחיל את הורדת הווידאו');
-      currentTaskId=r.taskId;$('downloadText').textContent='מוריד…';
+      currentTaskId=r.taskId||taskId;$('downloadText').textContent='מוריד…';
     }
-  }catch(e){setProgress(0,'שגיאה',String(e?.message||e));$('downloadText').textContent='נסה שוב';$('download').disabled=false;currentTaskStatus='error';setCancelVisible(false);}
+  }catch(e){
+    const msg=String(e?.message||e);
+    if(currentTaskStatus==='cancelled'||/בוטל|cancel/i.test(msg)){currentTaskStatus='cancelled';setProgress(0,'בוטל','ההורדה הופסקה והנתונים החלקיים שוחררו.');$('downloadText').textContent='הורד וידאו';$('download').disabled=false;setCancelVisible(false);return;}
+    setProgress(0,'שגיאה',msg);$('downloadText').textContent='נסה שוב';$('download').disabled=false;currentTaskStatus='error';setCancelVisible(false);
+  }
 }
 
 async function cancelDownload(){
   $('cancelDownload').disabled=true; $('cancelDownload').textContent='מבטל…';
   try{
-    if(currentTaskId) await chrome.runtime.sendMessage({type:'cancelTask',taskId:currentTaskId});
-    if(Number.isInteger(currentDirectDownloadId)) await chrome.runtime.sendMessage({type:'cancelDirectDownload',downloadId:currentDirectDownloadId});
+    const r=await chrome.runtime.sendMessage({type:'cancelContextDownloads',tabId:activeTab?.id,pageUrl:activeTab?.url||'',preferredTaskId:currentTaskId||''}).catch(()=>null);
+    if(!r?.ok&&currentTaskId)await chrome.runtime.sendMessage({type:'cancelTask',taskId:currentTaskId});
+    if(!r?.ok&&Number.isInteger(currentDirectDownloadId))await chrome.runtime.sendMessage({type:'cancelDirectDownload',downloadId:currentDirectDownloadId});
     currentTaskStatus='cancelled'; currentTaskId=null; currentDirectDownloadId=null; setProgress(0,'בוטל','ההורדה הופסקה והנתונים החלקיים שוחררו.'); $('downloadText').textContent='הורד וידאו'; $('download').disabled=false; setCancelVisible(false);
   }catch(e){setProgress(0,'שגיאה בביטול',String(e?.message||e));}
   finally{$('cancelDownload').disabled=false;$('cancelDownload').textContent='בטל הורדה';}
@@ -338,4 +403,4 @@ async function init(){
   const ok=await syncActiveTab();
   if(ok)await scanCurrentTab();
 }
-$('refresh').onclick=scan;$('scanAgain').onclick=scan;$('download').onclick=doDownload;$('cancelDownload').onclick=cancelDownload;$('downloadSubtitle').onclick=downloadSubtitle;$('downloadDebug').onclick=downloadDebug;$('quality').onchange=updateSplitAvailability;$('splitDownload').onchange=updateSplitEstimate;$('splitInfo').onclick=toggleSplitInfo;$('clear').onclick=async()=>{if(!activeTab?.id)return;await chrome.runtime.sendMessage({type:'clearStreams',tabId:activeTab.id});resetContextUi();renderTabContext(activeTab);setStatus('נוקו הזיהויים','לחץ על סריקה מחדש כדי לחפש שוב בטאב הנוכחי.')};init();
+$('refresh').onclick=scan;$('scanAgain').onclick=scan;$('download').onclick=doDownload;$('cancelDownload').onclick=cancelDownload;$('downloadSubtitle').onclick=downloadSubtitle;$('downloadDebug').onclick=downloadDebug;$('quality').onchange=updateSplitAvailability;$('splitDownload').onchange=updateSplitEstimate;$('limitTime').onchange=updateTimeAvailability;$('timeStart').oninput=updateSplitEstimate;$('timeEnd').oninput=updateSplitEstimate;$('splitInfo').onclick=toggleSplitInfo;$('clear').onclick=async()=>{if(!activeTab?.id)return;await chrome.runtime.sendMessage({type:'clearStreams',tabId:activeTab.id});resetContextUi();renderTabContext(activeTab);setStatus('נוקו הזיהויים','לחץ על סריקה מחדש כדי לחפש שוב בטאב הנוכחי.')};init();
